@@ -1,17 +1,26 @@
-name: Build QQ NT libs (latest)
+name: Build QQ NT libs
 
-# Periodically fetch the LATEST QQ NT release, build linkable artifacts for
-# Windows x64/arm64 and Linux x64/arm64, package each into a .zip, and upload
-# the four packages to a GitHub Release tagged `qq-<build>`.
-# A release whose four assets already exist is skipped (scheduled no-op).
+# MANUAL build. QQ geo-gates its download config (only China IPs get the latest;
+# overseas CI gets stale, pruned links) and the URLs carry an unguessable
+# per-build hash — so a US runner can't auto-discover the latest. You drive each
+# build: give the version and paste an official QQ download link (copied from
+# https://im.qq.com). Both arches are derived from one link per platform. The
+# four packages are published to a GitHub Release tagged `qq-<version>`.
 
 on:
-  schedule:
-    - cron: '0 */12 * * *'      # every 12 hours (UTC)
   workflow_dispatch:
     inputs:
+      version:
+        description: 'QQ version this build is for, e.g. 9.9.31-49738 (tag + what CMake requests)'
+        required: true
+      win_url:
+        description: 'Official QQ Windows installer link (any arch; x64+arm64 derived). Blank = skip Windows.'
+        default: ''
+      linux_url:
+        description: 'Official QQ Linux .deb link (any arch; amd64+arm64 derived). Blank = skip Linux.'
+        default: ''
       force:
-        description: 'Rebuild & re-upload even if the release already exists'
+        description: 'Rebuild & re-upload even if the release already has the assets'
         type: boolean
         default: false
 
@@ -29,30 +38,29 @@ jobs:
     outputs:
       skip: ${{ steps.r.outputs.skip }}
       tag: ${{ steps.r.outputs.tag }}
-      datecode: ${{ steps.r.outputs.datecode }}
-      winver3: ${{ steps.r.outputs.winver3 }}
-      linuxver3: ${{ steps.r.outputs.linuxver3 }}
-      update_date: ${{ steps.r.outputs.update_date }}
-      win_x64_url: ${{ steps.r.outputs.win_x64_url }}
-      win_arm64_url: ${{ steps.r.outputs.win_arm64_url }}
-      linux_x64_url: ${{ steps.r.outputs.linux_x64_url }}
-      linux_arm64_url: ${{ steps.r.outputs.linux_arm64_url }}
+      version: ${{ steps.r.outputs.version }}
+      win_matrix: ${{ steps.r.outputs.win_matrix }}
+      linux_matrix: ${{ steps.r.outputs.linux_matrix }}
       existing: ${{ steps.r.outputs.existing }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
-        with: { node-version: '22' }   # 22+ for zlib.zstdDecompressSync fallback
+        with: { node-version: '22' }
       - id: r
         run: node scripts/resolve.mjs
         env:
+          VERSION: ${{ inputs.version }}
+          WIN_URL: ${{ inputs.win_url }}
+          LINUX_URL: ${{ inputs.linux_url }}
           FORCE: ${{ inputs.force }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Summary
         run: |
           {
-            echo "### QQ libs (latest)"
-            echo "- release tag: \`${{ steps.r.outputs.tag }}\` (${{ steps.r.outputs.update_date }})"
-            echo "- windows ${{ steps.r.outputs.winver3 }} · linux ${{ steps.r.outputs.linuxver3 }} · date ${{ steps.r.outputs.datecode }}"
+            echo "### QQ libs · ${{ steps.r.outputs.version }}"
+            echo "- release tag: \`${{ steps.r.outputs.tag }}\`"
+            echo "- windows: ${{ steps.r.outputs.win_matrix }}"
+            echo "- linux: ${{ steps.r.outputs.linux_matrix }}"
             echo "- already on release: ${{ steps.r.outputs.existing }}"
             echo "- skip: ${{ steps.r.outputs.skip }}"
           } >> "$GITHUB_STEP_SUMMARY"
@@ -73,14 +81,14 @@ jobs:
             echo "release $tag already exists"
           else
             gh release create "$tag" -R "$GITHUB_REPOSITORY" \
-              --title "QQNT SDK · Windows ${{ needs.resolve.outputs.winver3 }} / Linux ${{ needs.resolve.outputs.linuxver3 }}" \
-              --notes "Import libs / linkable objects + matching Node/Electron headers (include as <QQNT/node.h>). Windows ${{ needs.resolve.outputs.winver3 }} · Linux ${{ needs.resolve.outputs.linuxver3 }} · ${{ needs.resolve.outputs.update_date }}. The exact x.x.xx-xxxxx build and node/electron/v8 versions are in each package's manifest.txt and in the asset filenames."
+              --title "QQNT SDK · ${{ needs.resolve.outputs.version }}" \
+              --notes "Import libs / linkable objects + matching Node/Electron headers (include as <QQNT/node.h>) for QQ ${{ needs.resolve.outputs.version }}. node/electron/v8 versions are in each package's manifest.txt."
           fi
 
   # -------------------------------------------------------------------------
   build-windows:
     needs: [resolve, prepare-release]
-    if: needs.resolve.outputs.skip != 'true'
+    if: needs.resolve.outputs.skip != 'true' && needs.resolve.outputs.win_matrix != '[]'
     runs-on: windows-latest
     env:
       # llvm-mingw: one toolchain for x64 + arm64 (gendef, llvm-dlltool, llvm-ar).
@@ -89,7 +97,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        arch: [x64, arm64]
+        include: ${{ fromJSON(needs.resolve.outputs.win_matrix) }}
     steps:
       - uses: actions/checkout@v4
 
@@ -119,12 +127,9 @@ jobs:
       - name: Download installer
         shell: pwsh
         run: |
-          $arch = "${{ matrix.arch }}"
-          $url = if ($arch -eq "x64") { "${{ needs.resolve.outputs.win_x64_url }}" } else { "${{ needs.resolve.outputs.win_arm64_url }}" }
-          if (-not $url) { throw "no Windows $arch URL resolved" }
           New-Item -ItemType Directory -Force -Path installer | Out-Null
-          Write-Host "==> $url"
-          curl.exe -fL --retry 3 --connect-timeout 30 -o installer/QQ-setup.exe $url
+          Write-Host "==> ${{ matrix.url }}"
+          curl.exe -fL --retry 3 --connect-timeout 30 -o installer/QQ-setup.exe "${{ matrix.url }}"
           if ($LASTEXITCODE -ne 0 -or (Get-Item installer/QQ-setup.exe).Length -lt 10485760) { throw "download failed" }
 
       - name: Generate import libraries (gendef + llvm-dlltool)
@@ -145,25 +150,22 @@ jobs:
   # -------------------------------------------------------------------------
   build-linux:
     needs: [resolve, prepare-release]
-    if: needs.resolve.outputs.skip != 'true'
+    if: needs.resolve.outputs.skip != 'true' && needs.resolve.outputs.linux_matrix != '[]'
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     strategy:
       fail-fast: false
       matrix:
-        arch: [x64, arm64]
+        include: ${{ fromJSON(needs.resolve.outputs.linux_matrix) }}
     steps:
       - uses: actions/checkout@v4
 
       - name: Download package
         run: |
-          arch="${{ matrix.arch }}"
-          if [ "$arch" = "x64" ]; then url="${{ needs.resolve.outputs.linux_x64_url }}"; else url="${{ needs.resolve.outputs.linux_arm64_url }}"; fi
-          [ -z "$url" ] && { echo "::error::no Linux $arch URL resolved"; exit 1; }
           mkdir -p pkg
-          echo "==> $url"
-          curl -fL --retry 3 --connect-timeout 30 -o pkg/qq.deb "$url"
+          echo "==> ${{ matrix.url }}"
+          curl -fL --retry 3 --connect-timeout 30 -o pkg/qq.deb "${{ matrix.url }}"
 
       - name: Extract & copy linkable objects
         run: |

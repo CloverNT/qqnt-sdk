@@ -1,115 +1,85 @@
 #!/usr/bin/env node
 // ---------------------------------------------------------------------------
-// resolve.mjs - Parse the official QQ frontend for the LATEST downloads.
+// resolve.mjs - MANUAL mode.
 //
-// QQ's CDN prunes old builds, so we never pin/guess a build - we take whatever
-// the official download pages currently serve (the latest, always present) and
-// let the build jobs detect the exact x.x.xx-xxxxx version from the binaries.
+// QQ's download config is geo-gated (it only serves the latest build to China
+// IPs; overseas/CI runners get a stale snapshot whose files are already pruned),
+// and the download URLs carry an unguessable per-build hash. So a US CI runner
+// cannot auto-discover the latest. Instead the maintainer drives each build:
 //
-// Flow: fetch the download page -> read its `rainbowConfigUrl` -> fetch that
-// config -> read the gtimg download URLs for windows x64/arm64 + linux x64/arm64.
-// The release is keyed by (windows 3-part version + 6-digit date code), both of
-// which are present in the URLs - no fragile partial-download of the .deb.
+//   version : the QQ version this build is for (e.g. 9.9.31-49738). Used for the
+//             release tag `qq-<version>` and what CMake consumers request.
+//   win_url : an official QQ Windows installer link (any arch) — both x64 and
+//             arm64 are derived from it by swapping the arch token.
+//   linux_url: an official QQ Linux .deb link (any arch) — amd64 + arm64 derived.
 //
-// Emits to $GITHUB_OUTPUT: the four URLs, winver3/linuxver3/datecode, the release
-// tag, and a `skip` flag (true when the release already has a .zip per arch slot).
+// The links are copied straight from QQ's download page (https://im.qq.com), so
+// this is still "direct from QQ" — no third-party version list. Each derived URL
+// is HEAD-checked against QQ's CDN so a typo or a pruned link is caught early.
 //
-// Env: FORCE=true to rebuild; GITHUB_REPOSITORY / GITHUB_TOKEN for the skip check.
+// Env: VERSION (required), WIN_URL and/or LINUX_URL (>=1), FORCE.
 // ---------------------------------------------------------------------------
 
 import { appendFileSync } from "node:fs";
 
-const PAGE = {
-  windows: "https://im.qq.com/pcqq/index.shtml",
-  linux:   "https://im.qq.com/linuxqq/index.shtml",
-};
-// Fallback config URLs if the page's rainbowConfigUrl can't be read.
-const FALLBACK_CONFIG = {
-  windows: "https://cdn-go.cn/qq-web/im.qq.com_new/latest/rainbow/windowsConfig.js",
-  linux:   "https://cdn-go.cn/qq-web/im.qq.com_new/latest/rainbow/linuxConfig.js",
-};
-
-const FORCE = (process.env.FORCE || "").trim().toLowerCase() === "true";
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const env = (k, d = "") => (process.env[k] ?? d).trim();
+const VERSION = env("VERSION");
+const WIN_URL = env("WIN_URL");
+const LINUX_URL = env("LINUX_URL");
+const FORCE = env("FORCE").toLowerCase() === "true";
 
 function fail(msg) {
   console.error(`::error::resolve: ${msg}`);
   process.exit(1);
 }
+if (!VERSION) fail('VERSION is required, e.g. "9.9.31-49738".');
+if (!WIN_URL && !LINUX_URL) fail("provide win_url and/or linux_url (an official QQ download link).");
 
-async function fetchText(url, tries = 4) {
-  let last;
-  for (let i = 0; i < tries; i++) {
-    try {
-      // Best-effort cache-bust + revalidate. (cdn-go's COS edge mostly ignores
-      // the query for its cache key, so this is not a reliable fix on its own —
-      // the freshness floor check below is what actually guards against stale.)
-      const u = url + (url.includes("?") ? "&" : "?") + "_cb=" + Date.now() + "." + i;
-      const r = await fetch(u, {
-        headers: {
-          "User-Agent": "Mozilla/5.0 qq-lib-autogen",
-          "Cache-Control": "no-cache, no-store, max-age=0",
-          Pragma: "no-cache",
-        },
-        signal: AbortSignal.timeout(30000),
-      });
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      return await r.text();
-    } catch (e) {
-      last = e;
-      await sleep(600 * (i + 1));
-    }
-  }
-  throw new Error(`fetch failed for ${url}: ${last}`);
+// Arch token in the QQ filename, e.g. QQ_9.9.31_260528_x64_01.exe /
+// QQ_3.2.29_260528_amd64_01.deb. Swapping it derives the sibling-arch URL.
+const WIN_RE = /_(x64|x86|arm64)_01\.(exe)\b/i;
+const LIN_RE = /_(amd64|arm64|x86_64|aarch64|loongarch64|mips64el)_01\.(deb|rpm|AppImage)\b/i;
+const swap = (url, re, token) => url.replace(re, (_m, _a, ext) => `_${token}_01.${ext}`);
+
+const isQQ = (u) => /^https:\/\/([a-z0-9.-]+\.)?(qq\.com|gtimg\.cn)\//i.test(u);
+for (const [k, u] of [["win_url", WIN_URL], ["linux_url", LINUX_URL]])
+  if (u && !isQQ(u)) console.error(`::warning::resolve: ${k} is not a qq.com/gtimg.cn link: ${u}`);
+
+// Candidate (folder-arch-token -> download URL) pairs derived from each input.
+const winCand = [];
+if (WIN_URL) {
+  if (WIN_RE.test(WIN_URL)) { winCand.push(["x64", swap(WIN_URL, WIN_RE, "x64")], ["arm64", swap(WIN_URL, WIN_RE, "arm64")]); }
+  else winCand.push(["x64", WIN_URL]); // unknown arch token: take as-is (x64)
+}
+const linCand = [];
+if (LINUX_URL) {
+  if (LIN_RE.test(LINUX_URL)) { linCand.push(["x64", swap(LINUX_URL, LIN_RE, "amd64")], ["arm64", swap(LINUX_URL, LIN_RE, "arm64")]); }
+  else linCand.push(["x64", LINUX_URL]);
 }
 
-// Liveness check, straight against QQ's CDN (no third-party version list): HEAD
-// the resolved download URL. A stale '/latest/' edge points at pruned files,
-// which QQ returns 404 for. (Uses HEAD, not a Range GET — gtimg can reject Range
-// from some CI IPs.)
-async function urlLive(url) {
-  if (!url) return true;
+// HEAD each URL against QQ's CDN. 403/404/410 => pruned/typo (drop); else keep.
+async function live(url) {
   try {
     const r = await fetch(url, {
-      method: "HEAD",
-      redirect: "follow",
+      method: "HEAD", redirect: "follow",
       headers: { "User-Agent": "Mozilla/5.0 qq-lib-autogen" },
       signal: AbortSignal.timeout(30000),
     });
-    // 403/404/410 => pruned/gone (dead). Anything else (2xx, 405, transient 5xx)
-    // => treat as live and let the build job's actual download settle it.
     return ![403, 404, 410].includes(r.status);
   } catch {
-    return true; // network hiccup: don't false-fail; the build job will retry
+    return true; // transient: don't drop; the build job's download will settle it
   }
 }
-
-// Rainbow config: `;(function(){var params= {...};  ...})()` -> pull the JSON.
-function parseRainbow(js) {
-  const m = js.match(/var\s+params\s*=\s*(\{[\s\S]*?\})\s*;/);
-  if (!m) throw new Error("could not parse rainbow config JSON");
-  return JSON.parse(m[1]);
-}
-
-// Parse the frontend: download page -> rainbowConfigUrl -> config params.
-async function frontendConfig(which) {
-  let cfgUrl = FALLBACK_CONFIG[which];
-  try {
-    const html = await fetchText(PAGE[which]);
-    const m = html.match(/rainbowConfigUrl\s*=\s*["']([^"']+)["']/);
-    if (m) {
-      cfgUrl = m[1].startsWith("//") ? "https:" + m[1] : m[1];
-      console.log(`::notice::resolve: ${which} frontend config -> ${cfgUrl}`);
-    } else {
-      console.log(`::notice::resolve: ${which} page had no rainbowConfigUrl; using fallback`);
-    }
-  } catch (e) {
-    console.log(`::notice::resolve: ${which} page fetch failed (${e.message}); using fallback config`);
+async function validate(cands, label) {
+  const keep = [];
+  for (const [arch, url] of cands) {
+    const ok = await live(url);
+    console.log(`::notice::resolve: ${ok ? "live" : "DEAD"} ${label}-${arch} -> ${url}`);
+    if (ok) keep.push({ arch, url });
   }
-  return parseRainbow(await fetchText(cfgUrl));
+  return keep;
 }
 
-// Asset names already attached to the release for `tag` (empty set if none).
 async function releaseAssets(tag) {
   const repo = process.env.GITHUB_REPOSITORY;
   if (!repo) return new Set();
@@ -117,93 +87,41 @@ async function releaseAssets(tag) {
   try {
     const r = await fetch(`https://api.github.com/repos/${repo}/releases/tags/${tag}`, {
       headers: {
-        "User-Agent": "qq-lib-autogen",
-        Accept: "application/vnd.github+json",
+        "User-Agent": "qq-lib-autogen", Accept: "application/vnd.github+json",
         ...(token ? { Authorization: `Bearer ${token}` } : {}),
       },
       signal: AbortSignal.timeout(30000),
     });
     if (!r.ok) return new Set();
-    const rel = await r.json();
-    return new Set((rel.assets || []).map((a) => a.name));
-  } catch {
-    return new Set();
-  }
+    return new Set(((await r.json()).assets || []).map((a) => a.name));
+  } catch { return new Set(); }
 }
 
 // --- resolve ---------------------------------------------------------------
 
-const winCfg = await frontendConfig("windows");
-const linCfg = await frontendConfig("linux");
+const winM = await validate(winCand, "win");
+const linM = await validate(linCand, "linux");
+if (!winM.length && !linM.length) fail("none of the provided URLs are live on QQ's CDN — check the links.");
+if (WIN_URL && !winM.length) console.error("::warning::resolve: win_url not live — skipping Windows.");
+if (LINUX_URL && !linM.length) console.error("::warning::resolve: linux_url not live — skipping Linux.");
 
 const out = {
-  winver3: winCfg.version || "",
-  linuxver3: linCfg.version || "",
-  update_date: winCfg.updateDate || linCfg.updateDate || "",
-  win_x64_url: winCfg.ntDownloadX64Url || "",
-  win_arm64_url: winCfg.ntDownloadARMUrl || "",
-  linux_x64_url: linCfg.x64DownloadUrl?.deb || "",
-  linux_arm64_url: linCfg.armDownloadUrl?.deb || "",
+  version: VERSION,
+  tag: `qq-${VERSION}`,
+  win_matrix: JSON.stringify(winM),
+  linux_matrix: JSON.stringify(linM),
+  force: String(FORCE),
 };
-for (const [k, v] of Object.entries(out))
-  if (!v && k.endsWith("_url")) console.error(`::warning::resolve: missing ${k} from frontend`);
 
-if (!out.win_x64_url && !out.linux_x64_url)
-  fail("frontend returned no download URLs (config shape changed or unreachable).");
-
-// --- stale-config guard (QQ-only) ------------------------------------------
-// cdn-go's "/latest/" rainbow config has been observed serving months-old
-// content to some CI runners (e.g. 9.9.21 instead of 9.9.31), whose CDN files
-// are pruned. Verify the resolved URLs are actually downloadable on QQ's CDN; if
-// a stale config points at pruned (404) files, reject rather than build an
-// ancient version that would 404 in the build jobs. A later run hits a fresh edge.
-// (Cross-check: windows and linux of one release share a date code.)
-const winDate = (out.win_x64_url.match(/_(\d{6})_/) || [])[1] || "";
-const linDate = (out.linux_x64_url.match(/_(\d{6})_/) || [])[1] || "";
-if (winDate && linDate && winDate !== linDate)
-  console.error(`::warning::resolve: windows date ${winDate} != linux date ${linDate} — possible stale cache on one config.`);
-
-const live = await Promise.all(
-  [["win-x64", out.win_x64_url], ["win-arm64", out.win_arm64_url],
-   ["linux-x64", out.linux_x64_url], ["linux-arm64", out.linux_arm64_url]]
-    .map(async ([k, u]) => [k, u, await urlLive(u)]));
-for (const [k, u, ok] of live) if (u) console.log(`::notice::resolve: ${ok ? "live" : "DEAD"} ${k} -> ${u}`);
-const dead = live.filter(([, u, ok]) => u && !ok).map(([k]) => k);
-if (dead.length)
-  fail(
-    `resolved download URL(s) not live on QQ's CDN: ${dead.join(", ")}. cdn-go's '/latest/' edge served ` +
-    `this runner a stale config pointing at pruned files. Re-run — a later run usually hits a fresh edge.`
-  );
-
-// Date code (YYMMDD), and the per-build content hash from the .../release/<hash>/
-// path segment. Tencent occasionally ships same-day rebuilds (same date, new
-// hash), so the hash — not the date — is what makes a release key unique; we
-// keep the date too for readability. The exact x.x.xx-xxxxx build goes into the
-// asset names (detected from the binaries by the build jobs).
-const anyUrl = out.win_x64_url || out.win_arm64_url || out.linux_x64_url || out.linux_arm64_url;
-out.datecode = (anyUrl.match(/_(\d{6})_/) || [])[1] || "";
-const hash = (anyUrl.match(/\/release\/([0-9a-f]{6,})\//) || [])[1] || "";
-
-const keyparts = [out.winver3 || out.linuxver3, out.datecode, hash].filter(Boolean);
-if (!keyparts.length) fail("could not derive a release key (no version/date/hash in frontend URLs).");
-out.tag = `qq-${keyparts.join("-")}`;
-
-// Skip when the release already has a .zip for each arch slot, regardless of the
-// exact version/build in each filename (robust to cross-platform skew).
+// Skip when the release already has a .zip for every requested arch slot.
+const wantSlots = [...winM.map((e) => `windows-${e.arch}`), ...linM.map((e) => `linux-${e.arch}`)];
 const present = await releaseAssets(out.tag);
 const presentZips = [...present].filter((a) => a.endsWith(".zip"));
-const SLOTS = ["windows-x64", "windows-arm64", "linux-x64", "linux-arm64"];
 out.existing = presentZips.join(",");
-out.skip = String(!FORCE && SLOTS.every((s) => presentZips.some((a) => a.endsWith(`-${s}.zip`))));
-out.force = String(FORCE);
-
-// --- emit ------------------------------------------------------------------
+out.skip = String(!FORCE && wantSlots.length > 0 && wantSlots.every((s) => presentZips.some((a) => a.endsWith(`-${s}.zip`))));
 
 const gh = process.env.GITHUB_OUTPUT;
-if (gh) {
-  const lines = Object.entries(out).map(([k, v]) => `${k}=${String(v).replace(/\r?\n/g, " ")}`);
-  appendFileSync(gh, lines.join("\n") + "\n");
-}
+if (gh) appendFileSync(gh, Object.entries(out).map(([k, v]) => `${k}=${String(v).replace(/\r?\n/g, " ")}`).join("\n") + "\n");
 
-console.log("=== resolve (latest from frontend) ===");
+console.log("=== resolve (manual) ===");
 for (const [k, v] of Object.entries(out)) console.log(`${k}: ${v}`);

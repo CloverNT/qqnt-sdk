@@ -1,9 +1,11 @@
 # qq_lib_autogen
 
-A scheduled GitHub Actions pipeline that tracks the **latest QQ NT release** and
-publishes a **QQNT SDK** for it as a GitHub Release — four `.zip` packages
-(**Windows x64/arm64**, **Linux x64/arm64**), each containing the linkable libs
-**and** the matching Node/Electron headers.
+A GitHub Actions pipeline you trigger manually — give it a QQ version and an
+official QQ download link — that publishes a **QQNT SDK** as a GitHub Release:
+four `.zip` packages (**Windows x64/arm64**, **Linux x64/arm64**), each with the
+linkable libs **and** the matching Node/Electron headers. (Manual because QQ
+geo-gates its version config, so CI can't auto-discover the latest — see
+[Why manual?](#why-manual).)
 
 - **Windows libs** → `gendef` dumps the exports and `llvm-dlltool` builds an
   import library: `<name>.def` + `lib<name>.a`, for `QQ.exe`, `QQNT.dll`,
@@ -17,7 +19,7 @@ publishes a **QQNT SDK** for it as a GitHub Release — four `.zip` packages
 
 ## Package contents & naming
 
-Release **tag `qq-<winver3>-<date>-<hash>`** (e.g. `qq-9.9.31-260528-092069d7`), four assets:
+Release **tag `qq-<version>`** (e.g. `qq-9.9.31-49738` — the version you passed), four assets:
 
 ```
 qqnt-sdk-9.9.31-49738-windows-x64.zip
@@ -37,9 +39,8 @@ qqnt-sdk-<x.x.xx-xxxxx>-<system>-<arch>/
 
 The asset's `<x.x.xx-xxxxx>` is the platform's own version + the shared build
 number (`9.9.31-49738` on Windows, `3.2.29-49738` on Linux for the same release),
-detected from the binaries. The release **tag** is keyed by the Windows 3-part
-version + the download date code (both read straight from the frontend), so it's
-robust without partial-downloading anything.
+detected from the binaries. The release **tag** is `qq-<version>` from the version
+you passed in — that's what CMake consumers request.
 
 ## Using the headers
 
@@ -68,7 +69,7 @@ cmake_minimum_required(VERSION 3.19)
 project(myapp CXX)
 
 set(QQNT_SDK_REPO    "CloverNT/qqnt-sdk")   # the repo hosting the releases
-set(QQNT_SDK_VERSION "latest")       # or a release tag, e.g. "qq-9.9.31-260528-092069d7"
+set(QQNT_SDK_VERSION "9.9.31-49738")  # the version you built; or "latest" for the newest release
 include(/path/to/cmake/qqnt_sdk.cmake)
 
 add_executable(myapp main.cpp)
@@ -97,37 +98,39 @@ files (the packaged `lib*.a` are MinGW/clang import libs); with clang/MinGW the
 
 ## How it works
 
-- **Schedule:** every 12 h (cron) it parses the official QQ download pages for
-  the **latest** download URLs. **Manual:** Actions → *Build QQ NT libs (latest)*
-  → *Run workflow* (tick **force** to rebuild a release that already exists).
-- If the release `qq-<winver3>-<date>-<hash>` already has a `.zip` for each of the four
-  arch slots, the run is a **no-op**.
-- Otherwise: `prepare-release` creates the release once, then four matrix jobs
-  build in parallel, each `gh release upload --clobber` its package.
-- **Header/version detection:** each build job scans its binary (`QQNT.dll` on
-  Windows, `qq` on Linux) for the `Electron/<x.y.z>` string, downloads
-  `https://artifacts.electronjs.org/headers/dist/v<E>/node-v<E>-headers.tar.gz`,
-  and remaps `include/node/*` → `include/QQNT/*`. The Node and V8 versions
-  (mapped from the Electron version) are recorded in `manifest.txt`.
+1. **You trigger it:** Actions → *Build QQ NT libs* → *Run workflow*, and fill in:
+   - `version` — the QQ version this build is for, e.g. `9.9.31-49738` (becomes the
+     release tag `qq-9.9.31-49738`, and what CMake consumers request).
+   - `win_url` — an official QQ **Windows** installer link (any arch). Blank = skip Windows.
+   - `linux_url` — an official QQ **Linux `.deb`** link (any arch). Blank = skip Linux.
+   - `force` — rebuild even if the release already has the assets.
 
-### Resolution: always the latest, parsed from the frontend
+   Get the links from <https://im.qq.com> (download page → copy the link). One
+   link per platform is enough — `resolve.mjs` derives the sibling arch by
+   swapping the arch token (`_x64_`↔`_arm64_`, `_amd64_`↔`_arm64_`) and `HEAD`s
+   each against QQ's CDN to drop any that are pruned/typo'd.
+2. `prepare-release` creates the release `qq-<version>` once.
+3. Matrix jobs (one per live arch) download the installer/`.deb`, build the libs,
+   bundle the headers, and `gh release upload --clobber` their `.zip`.
+4. **Header/version detection:** each build job scans its binary (`QQNT.dll` on
+   Windows, `qq` on Linux) for the `Electron/<x.y.z>` string, downloads
+   `https://artifacts.electronjs.org/headers/dist/v<E>/node-v<E>-headers.tar.gz`,
+   and remaps `include/node/*` → `include/QQNT/*`. The exact `x.x.xx-xxxxx` build
+   and the node/electron/v8 versions are detected from the binaries and recorded
+   in the asset names + `manifest.txt`.
 
-QQ's CDN prunes old builds, so the pipeline never pins or guesses a build — it
-takes whatever the official site currently serves. `resolve.mjs` fetches the
-download page (`im.qq.com/pcqq/index.shtml`, `…/linuxqq/index.shtml`), reads its
-`rainbowConfigUrl`, fetches that config, and pulls the four download URLs (all on
-`gtimg.cn`, which works worldwide from CI). It keys the release on the Windows
-3-part version + date code + the per-build content hash from the `…/release/<hash>/`
-URL segment (so same-day rebuilds get a distinct release) — no partial-download.
+A run is a no-op (`skip`) if the release already has a `.zip` for every requested
+arch slot (override with `force`).
 
-To guard against the rare case where `cdn-go`'s `/latest/` edge serves a *stale*
-config to a runner (pointing at versions QQ's CDN has already pruned), the
-resolver `HEAD`s the four download URLs **directly against QQ's CDN** — no
-third-party version list — and fails the run if any 404, so it never builds an
-ancient version; the next scheduled run lands on a fresh edge.
-The exact `x.x.xx-xxxxx` build is detected from the binaries themselves (Windows
-`versions/<ver>` folder, Linux `resources/app/package.json`) and goes into the
-asset names + `manifest.txt`.
+### Why manual?
+
+QQ's version config (`cdn-go.cn`) is **geo-gated**: only China IPs get the latest;
+overseas/CI runners get a months-stale snapshot whose installer files QQ has
+already pruned (404). The download URLs also carry an **unguessable per-build hash**
+(`…/release/<hash>/…`), so a version number alone can't be turned into a URL. So a
+CI runner genuinely *cannot* auto-discover the latest. The reliable, QQ-direct
+path is: you (who can see the current version) paste the official link; CI
+downloads it (the **bytes** download fine worldwide once the URL is known).
 
 ## Target mapping
 
@@ -141,7 +144,7 @@ asset names + `manifest.txt`.
 
 ```
 .github/workflows/build_qq_libs.yml   resolve → prepare-release → build-windows / build-linux (matrix)
-scripts/resolve.mjs                   latest release → URLs + shared build + release-skip
+scripts/resolve.mjs                   version + QQ link → per-arch URLs (HEAD-checked) + release-skip
 scripts/gen_import_libs.sh            Windows: 7z extract + gendef + llvm-dlltool + headers
 scripts/extract_linux.sh             Linux: dpkg-deb extract + copy ELF + headers
 scripts/fetch_headers.sh             detect Electron ver → download node headers → include/QQNT
@@ -157,7 +160,6 @@ are hundreds of MB — they belong in releases, not git history).
 - Requires **Read and write** workflow permissions (Settings → Actions → General)
   so the jobs can create/upload the release with the built-in `GITHUB_TOKEN`.
 - `LLVM_MINGW_TAG` in the workflow pins the toolchain (cached); bump to update.
-- Tune the cadence via the `cron` line.
 
 ## Caveats / limitations
 
@@ -170,11 +172,12 @@ are hundreds of MB — they belong in releases, not git history).
 - **`QQ.exe` exports:** an EXE may export few/no symbols; its `.def`/`.a` can be
   small — expected.
 - **arm64 Windows import libs** are produced cross-host with `llvm-dlltool`.
-- **`skip`** treats a release as done once it has a `.zip` for each arch slot
-  under tag `qq-<winver3>-<date>-<hash>`; uploads use `--clobber`, so re-runs never
+- **`skip`** treats a release as done once it has a `.zip` for each requested arch
+  slot under tag `qq-<version>`; uploads use `--clobber`, so re-runs never
   duplicate or corrupt assets. Use **force** to rebuild.
-- **Latest only:** the pipeline tracks the current release (QQ's CDN prunes old
-  builds, so only the latest is reliably downloadable).
+- **Manual / you supply the link:** QQ geo-gates version discovery and its URLs
+  carry an unguessable per-build hash, so CI can't auto-find the latest — you paste
+  the official link (the bytes then download fine from any region).
 
 ## Local testing
 
