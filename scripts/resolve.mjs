@@ -62,32 +62,73 @@ function parseRainbow(js) {
   return JSON.parse(m[1]);
 }
 
-// Read the build number + linux 3-part version from a .deb's control file using
-// a single small range request. Returns { build, linuxver3 } or null.
+// Pull { build, linuxver3 } from a .deb's control file. Tries a cheap ranged
+// read first, then falls back to a full GET (some CDNs/edges mishandle Range
+// for certain client regions, e.g. GitHub's runners vs Tencent's gtimg.cn).
+// Verbose on purpose so the CI log shows exactly what happened.
 async function cheapBuild(url) {
-  try {
-    const buf = await fetchRetry(url, "buffer", { headers: { Range: "bytes=0-262143" } });
-    if (buf.slice(0, 8).toString() !== "!<arch>\n") return null;
-    let pos = 8, found = null;
-    while (pos + 60 <= buf.length) {
-      const name = buf.slice(pos, pos + 16).toString().trim().replace(/\/+$/, "");
-      const size = parseInt(buf.slice(pos + 48, pos + 58).toString().trim(), 10);
-      if (!Number.isFinite(size)) break;
-      const data = pos + 60;
-      if (name.startsWith("control.tar")) { found = { name, data, size }; break; }
-      pos = data + size + (size % 2);
+  const tag = "::notice::resolve cheapBuild";
+  for (const useRange of [true, false]) {
+    try {
+      const headers = { "User-Agent": "qq-lib-autogen" };
+      if (useRange) headers.Range = "bytes=0-262143";
+      // Timeout so a slow/blocked CDN edge can't hang the job (full GET pulls the
+      // whole .deb, so give it more room than the tiny ranged read).
+      const r = await fetch(url, { headers, signal: AbortSignal.timeout(useRange ? 45000 : 180000) });
+      console.log(`${tag} ${useRange ? "range" : "full"}: status=${r.status} len=${r.headers.get("content-length")}`);
+      if (!r.ok && r.status !== 206) continue;
+      const buf = Buffer.from(await r.arrayBuffer());
+      if (buf.slice(0, 8).toString() !== "!<arch>\n") {
+        console.log(`${tag}: not an ar archive (first bytes ${JSON.stringify(buf.slice(0, 16).toString("latin1"))})`);
+        continue;
+      }
+      let pos = 8, found = null;
+      while (pos + 60 <= buf.length) {
+        const name = buf.slice(pos, pos + 16).toString().trim().replace(/\/+$/, "");
+        const size = parseInt(buf.slice(pos + 48, pos + 58).toString().trim(), 10);
+        if (!Number.isFinite(size)) break;
+        const data = pos + 60;
+        if (name.startsWith("control.tar")) { found = { name, data, size }; break; }
+        pos = data + size + (size % 2);
+      }
+      if (!found) { console.log(`${tag}: no control.tar member in fetched bytes`); continue; }
+      if (found.data + found.size > buf.length) {
+        console.log(`${tag}: control beyond fetched range (${found.size}B)`);
+        continue; // a full GET on the next iteration has the whole member
+      }
+      const blob = buf.slice(found.data, found.data + found.size);
+      let txt;
+      if (found.name.endsWith(".gz")) txt = zlib.gunzipSync(blob).toString("latin1");
+      else if (found.name.endsWith(".zst") && zlib.zstdDecompressSync) txt = zlib.zstdDecompressSync(blob).toString("latin1");
+      else { console.log(`${tag}: unsupported control compression '${found.name}'`); continue; }
+      const m = txt.match(/Version:\s*(\d+\.\d+\.\d+)-(\d+)/);
+      if (m) return { linuxver3: m[1], build: m[2] };
+      console.log(`${tag}: no Version: line in control`);
+    } catch (e) {
+      console.log(`${tag} ${useRange ? "range" : "full"}: error ${e.message}`);
     }
-    if (!found || found.data + found.size > buf.length) return null;
-    const blob = buf.slice(found.data, found.data + found.size);
-    let txt;
-    if (found.name.endsWith(".gz")) txt = zlib.gunzipSync(blob).toString("latin1");
-    else if (found.name.endsWith(".zst") && zlib.zstdDecompressSync)
-      txt = zlib.zstdDecompressSync(blob).toString("latin1");
-    else return null;
-    const m = txt.match(/Version:\s*(\d+\.\d+\.\d+)-(\d+)/);
-    return m ? { linuxver3: m[1], build: m[2] } : null;
-  } catch {
-    return null;
+  }
+  return null;
+}
+
+// CI-reliable fallback: derive the build from the version-history archive on
+// raw.githubusercontent.com (always reachable from GitHub runners) by matching
+// the 3-part Windows version. The build number is shared across platforms.
+async function buildFromArchive(winver3) {
+  try {
+    const versions = await fetchRetry(
+      "https://raw.githubusercontent.com/PRO-2684/qqnt-version-history/main/versions.json", "json");
+    let best = 0;
+    for (const e of Object.values(versions)) {
+      if (e.version && e.version.startsWith(winver3 + ".")) {
+        const b = parseInt(e.version.split(".")[3], 10);
+        if (Number.isFinite(b) && b > best) best = b;
+      }
+    }
+    return best ? String(best) : "";
+  } catch (e) {
+    console.log(`::notice::resolve archive lookup error: ${e.message}`);
+    return "";
   }
 }
 
@@ -127,12 +168,22 @@ const out = {
 };
 for (const [k, v] of Object.entries(out))
   if (!v && k.endsWith("_url")) console.error(`::warning::resolve: missing ${k} in official config`);
+console.log(`::notice::resolve: winver3=${out.winver3} linuxver3?=${linCfg.version} linux_x64_url=${out.linux_x64_url || "(none)"}`);
 
 const probe = out.linux_x64_url ? await cheapBuild(out.linux_x64_url) : null;
 out.build = probe?.build || "";
 out.linuxver3 = probe?.linuxver3 || linCfg.version || "";
-if (!out.build)
-  fail("could not read the build number from the .deb control file; cannot name the release. Re-run later.");
+if (!out.build) {
+  console.log("::notice::resolve: .deb probe gave no build; falling back to the version-history archive");
+  out.build = await buildFromArchive(out.winver3);
+}
+if (!out.build) {
+  fail(
+    `could not determine the build number. The cheap .deb probe failed (see notices above) AND ` +
+    `the version-history archive has no entry for ${out.winver3}. ` +
+    `linux_x64_url=${out.linux_x64_url || "(none)"}. Re-run later, or pin a known build.`
+  );
+}
 
 // The four target SDK folders / release assets, and the per-build release tag.
 const folders = [
