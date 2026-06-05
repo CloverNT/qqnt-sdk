@@ -29,7 +29,7 @@ jobs:
     outputs:
       skip: ${{ steps.r.outputs.skip }}
       tag: ${{ steps.r.outputs.tag }}
-      build: ${{ steps.r.outputs.build }}
+      datecode: ${{ steps.r.outputs.datecode }}
       winver3: ${{ steps.r.outputs.winver3 }}
       linuxver3: ${{ steps.r.outputs.linuxver3 }}
       update_date: ${{ steps.r.outputs.update_date }}
@@ -37,7 +37,6 @@ jobs:
       win_arm64_url: ${{ steps.r.outputs.win_arm64_url }}
       linux_x64_url: ${{ steps.r.outputs.linux_x64_url }}
       linux_arm64_url: ${{ steps.r.outputs.linux_arm64_url }}
-      assets: ${{ steps.r.outputs.assets }}
       existing: ${{ steps.r.outputs.existing }}
     steps:
       - uses: actions/checkout@v4
@@ -52,9 +51,8 @@ jobs:
         run: |
           {
             echo "### QQ libs (latest)"
-            echo "- release tag: \`${{ steps.r.outputs.tag }}\` (build ${{ steps.r.outputs.build }}, ${{ steps.r.outputs.update_date }})"
-            echo "- windows ${{ steps.r.outputs.winver3 }} · linux ${{ steps.r.outputs.linuxver3 }}"
-            echo "- assets: ${{ steps.r.outputs.assets }}"
+            echo "- release tag: \`${{ steps.r.outputs.tag }}\` (${{ steps.r.outputs.update_date }})"
+            echo "- windows ${{ steps.r.outputs.winver3 }} · linux ${{ steps.r.outputs.linuxver3 }} · date ${{ steps.r.outputs.datecode }}"
             echo "- already on release: ${{ steps.r.outputs.existing }}"
             echo "- skip: ${{ steps.r.outputs.skip }}"
           } >> "$GITHUB_STEP_SUMMARY"
@@ -75,8 +73,8 @@ jobs:
             echo "release $tag already exists"
           else
             gh release create "$tag" -R "$GITHUB_REPOSITORY" \
-              --title "QQNT SDK · build ${{ needs.resolve.outputs.build }}" \
-              --notes "Import libs / linkable objects + matching Node/Electron headers (include as <QQNT/node.h>). Windows ${{ needs.resolve.outputs.winver3 }} · Linux ${{ needs.resolve.outputs.linuxver3 }} · build ${{ needs.resolve.outputs.build }} (${{ needs.resolve.outputs.update_date }}). See manifest.txt in each package for node/electron/v8 versions."
+              --title "QQNT SDK · Windows ${{ needs.resolve.outputs.winver3 }} / Linux ${{ needs.resolve.outputs.linuxver3 }}" \
+              --notes "Import libs / linkable objects + matching Node/Electron headers (include as <QQNT/node.h>). Windows ${{ needs.resolve.outputs.winver3 }} · Linux ${{ needs.resolve.outputs.linuxver3 }} · ${{ needs.resolve.outputs.update_date }}. The exact x.x.xx-xxxxx build and node/electron/v8 versions are in each package's manifest.txt and in the asset filenames."
           fi
 
   # -------------------------------------------------------------------------

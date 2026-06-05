@@ -8,7 +8,7 @@
 # Quick start (in your CMakeLists.txt):
 #
 #   set(QQNT_SDK_REPO   "owner/repo")     # the GitHub repo that hosts the releases
-#   set(QQNT_SDK_VERSION "latest")        # or "49738" / "qq-49738" / "9.9.31-49738"
+#   set(QQNT_SDK_VERSION "latest")        # or a release tag, e.g. "qq-9.9.31-260528-092069d7"
 #   include(${CMAKE_CURRENT_LIST_DIR}/cmake/qqnt_sdk.cmake)
 #
 #   add_executable(app main.cpp)
@@ -18,7 +18,7 @@
 # Options / cache variables (set before include()):
 #   QQNT_SDK_REPO         owner/repo (required; auto-detected from this checkout's
 #                         git 'origin' remote if unset)
-#   QQNT_SDK_VERSION      "latest" (default) or a build number / tag / full version
+#   QQNT_SDK_VERSION      "latest" (default) or a release tag (qq-<winver3>-<date>-<hash>)
 #   QQNT_SDK_ARCH         x64 | arm64        (default: from CMAKE_SYSTEM_PROCESSOR)
 #   QQNT_SDK_CACHE_DIR    download/extract cache (default: per-user cache dir)
 #   QQNT_SDK_GITHUB_TOKEN token for the releases API / private repos (optional)
@@ -144,15 +144,17 @@ if(NOT _qq_dir)
     endif()
     message(STATUS "qqnt_sdk: OFFLINE, using cached ${_qq_dir}")
   else()
-    # Build the releases API url: latest, or a specific tag qq-<build>.
+    # Build the releases API url: the newest release, or a specific tag. Accept
+    # either a full tag ("qq-9.9.31-260528-092069d7") or a bare key ("9.9.31-260528").
     if(QQNT_SDK_VERSION STREQUAL "latest")
       set(_qq_api "https://api.github.com/repos/${QQNT_SDK_REPO}/releases/latest")
     else()
-      string(REGEX MATCH "[0-9]+$" _qq_build "${QQNT_SDK_VERSION}")  # trailing build digits
-      if(NOT _qq_build)
-        message(FATAL_ERROR "qqnt_sdk: cannot parse a build number from '${QQNT_SDK_VERSION}'.")
+      if(QQNT_SDK_VERSION MATCHES "^qq-")
+        set(_qq_tag "${QQNT_SDK_VERSION}")
+      else()
+        set(_qq_tag "qq-${QQNT_SDK_VERSION}")
       endif()
-      set(_qq_api "https://api.github.com/repos/${QQNT_SDK_REPO}/releases/tags/qq-${_qq_build}")
+      set(_qq_api "https://api.github.com/repos/${QQNT_SDK_REPO}/releases/tags/${_qq_tag}")
     endif()
 
     set(_qq_json "${QQNT_SDK_CACHE_DIR}/.release-${QQNT_SDK_VERSION}-${_qq_slot}.json")

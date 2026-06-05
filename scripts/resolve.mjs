@@ -1,135 +1,83 @@
 #!/usr/bin/env node
 // ---------------------------------------------------------------------------
-// resolve.mjs - Plan a "latest QQ NT" build across all four targets and decide
-// whether the GitHub Release for this build already exists.
+// resolve.mjs - Parse the official QQ frontend for the LATEST downloads.
 //
-// Resolves the CURRENT QQ release from Tencent's official rainbow configs and
-// emits, to $GITHUB_OUTPUT, the download URLs for:
-//     windows x64 / arm64   (gtimg.cn, works worldwide)
-//     linux   x64 / arm64   (.deb, gtimg.cn)
-// plus the shared build number, per-platform version, the release tag, the four
-// expected asset names, and a `skip` flag that is true when the release already
-// has all four .zip assets (so a scheduled run is a no-op when nothing changed).
+// QQ's CDN prunes old builds, so we never pin/guess a build - we take whatever
+// the official download pages currently serve (the latest, always present) and
+// let the build jobs detect the exact x.x.xx-xxxxx version from the binaries.
 //
-// The official configs expose only a 3-part version (no build number), so we
-// read the real build cheaply by range-fetching just the .deb's control file
-// (~40 KB at the front of the ar archive) instead of the ~200 MB package.
+// Flow: fetch the download page -> read its `rainbowConfigUrl` -> fetch that
+// config -> read the gtimg download URLs for windows x64/arm64 + linux x64/arm64.
+// The release is keyed by (windows 3-part version + 6-digit date code), both of
+// which are present in the URLs - no fragile partial-download of the .deb.
 //
-// Env:
-//   FORCE              "true" to ignore an existing release and rebuild
-//   GITHUB_REPOSITORY  owner/repo (auto-set in Actions) - used for the skip check
-//   GITHUB_TOKEN       token for the release API (auto-set in Actions)
+// Emits to $GITHUB_OUTPUT: the four URLs, winver3/linuxver3/datecode, the release
+// tag, and a `skip` flag (true when the release already has a .zip per arch slot).
+//
+// Env: FORCE=true to rebuild; GITHUB_REPOSITORY / GITHUB_TOKEN for the skip check.
 // ---------------------------------------------------------------------------
 
 import { appendFileSync } from "node:fs";
-import zlib from "node:zlib";
 
-const WIN_CONFIG =
-  "https://cdn-go.cn/qq-web/im.qq.com_new/latest/rainbow/windowsConfig.js";
-const LINUX_CONFIG =
-  "https://cdn-go.cn/qq-web/im.qq.com_new/latest/rainbow/linuxConfig.js";
+const PAGE = {
+  windows: "https://im.qq.com/pcqq/index.shtml",
+  linux:   "https://im.qq.com/linuxqq/index.shtml",
+};
+// Fallback config URLs if the page's rainbowConfigUrl can't be read.
+const FALLBACK_CONFIG = {
+  windows: "https://cdn-go.cn/qq-web/im.qq.com_new/latest/rainbow/windowsConfig.js",
+  linux:   "https://cdn-go.cn/qq-web/im.qq.com_new/latest/rainbow/linuxConfig.js",
+};
 
 const FORCE = (process.env.FORCE || "").trim().toLowerCase() === "true";
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function fail(msg) {
   console.error(`::error::resolve: ${msg}`);
   process.exit(1);
 }
 
-async function fetchRetry(url, kind = "text", opts = {}, tries = 4) {
-  let lastErr;
+async function fetchText(url, tries = 4) {
+  let last;
   for (let i = 0; i < tries; i++) {
     try {
       const r = await fetch(url, {
-        headers: { "User-Agent": "qq-lib-autogen", ...(opts.headers || {}) },
+        headers: { "User-Agent": "Mozilla/5.0 qq-lib-autogen" },
+        signal: AbortSignal.timeout(30000),
       });
-      if (!r.ok && r.status !== 206) throw new Error(`HTTP ${r.status}`);
-      if (kind === "json") return await r.json();
-      if (kind === "buffer") return Buffer.from(await r.arrayBuffer());
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
       return await r.text();
     } catch (e) {
-      lastErr = e;
-      await new Promise((res) => setTimeout(res, 600 * (i + 1)));
+      last = e;
+      await sleep(600 * (i + 1));
     }
   }
-  throw new Error(`fetch failed for ${url}: ${lastErr}`);
+  throw new Error(`fetch failed for ${url}: ${last}`);
 }
 
-// Rainbow configs: `;(function(){var params= {...};  ...})()` -> pull the JSON.
+// Rainbow config: `;(function(){var params= {...};  ...})()` -> pull the JSON.
 function parseRainbow(js) {
   const m = js.match(/var\s+params\s*=\s*(\{[\s\S]*?\})\s*;/);
   if (!m) throw new Error("could not parse rainbow config JSON");
   return JSON.parse(m[1]);
 }
 
-// Pull { build, linuxver3 } from a .deb's control file. Tries a cheap ranged
-// read first, then falls back to a full GET (some CDNs/edges mishandle Range
-// for certain client regions, e.g. GitHub's runners vs Tencent's gtimg.cn).
-// Verbose on purpose so the CI log shows exactly what happened.
-async function cheapBuild(url) {
-  const tag = "::notice::resolve cheapBuild";
-  for (const useRange of [true, false]) {
-    try {
-      const headers = { "User-Agent": "qq-lib-autogen" };
-      if (useRange) headers.Range = "bytes=0-262143";
-      // Timeout so a slow/blocked CDN edge can't hang the job (full GET pulls the
-      // whole .deb, so give it more room than the tiny ranged read).
-      const r = await fetch(url, { headers, signal: AbortSignal.timeout(useRange ? 45000 : 180000) });
-      console.log(`${tag} ${useRange ? "range" : "full"}: status=${r.status} len=${r.headers.get("content-length")}`);
-      if (!r.ok && r.status !== 206) continue;
-      const buf = Buffer.from(await r.arrayBuffer());
-      if (buf.slice(0, 8).toString() !== "!<arch>\n") {
-        console.log(`${tag}: not an ar archive (first bytes ${JSON.stringify(buf.slice(0, 16).toString("latin1"))})`);
-        continue;
-      }
-      let pos = 8, found = null;
-      while (pos + 60 <= buf.length) {
-        const name = buf.slice(pos, pos + 16).toString().trim().replace(/\/+$/, "");
-        const size = parseInt(buf.slice(pos + 48, pos + 58).toString().trim(), 10);
-        if (!Number.isFinite(size)) break;
-        const data = pos + 60;
-        if (name.startsWith("control.tar")) { found = { name, data, size }; break; }
-        pos = data + size + (size % 2);
-      }
-      if (!found) { console.log(`${tag}: no control.tar member in fetched bytes`); continue; }
-      if (found.data + found.size > buf.length) {
-        console.log(`${tag}: control beyond fetched range (${found.size}B)`);
-        continue; // a full GET on the next iteration has the whole member
-      }
-      const blob = buf.slice(found.data, found.data + found.size);
-      let txt;
-      if (found.name.endsWith(".gz")) txt = zlib.gunzipSync(blob).toString("latin1");
-      else if (found.name.endsWith(".zst") && zlib.zstdDecompressSync) txt = zlib.zstdDecompressSync(blob).toString("latin1");
-      else { console.log(`${tag}: unsupported control compression '${found.name}'`); continue; }
-      const m = txt.match(/Version:\s*(\d+\.\d+\.\d+)-(\d+)/);
-      if (m) return { linuxver3: m[1], build: m[2] };
-      console.log(`${tag}: no Version: line in control`);
-    } catch (e) {
-      console.log(`${tag} ${useRange ? "range" : "full"}: error ${e.message}`);
-    }
-  }
-  return null;
-}
-
-// CI-reliable fallback: derive the build from the version-history archive on
-// raw.githubusercontent.com (always reachable from GitHub runners) by matching
-// the 3-part Windows version. The build number is shared across platforms.
-async function buildFromArchive(winver3) {
+// Parse the frontend: download page -> rainbowConfigUrl -> config params.
+async function frontendConfig(which) {
+  let cfgUrl = FALLBACK_CONFIG[which];
   try {
-    const versions = await fetchRetry(
-      "https://raw.githubusercontent.com/PRO-2684/qqnt-version-history/main/versions.json", "json");
-    let best = 0;
-    for (const e of Object.values(versions)) {
-      if (e.version && e.version.startsWith(winver3 + ".")) {
-        const b = parseInt(e.version.split(".")[3], 10);
-        if (Number.isFinite(b) && b > best) best = b;
-      }
+    const html = await fetchText(PAGE[which]);
+    const m = html.match(/rainbowConfigUrl\s*=\s*["']([^"']+)["']/);
+    if (m) {
+      cfgUrl = m[1].startsWith("//") ? "https:" + m[1] : m[1];
+      console.log(`::notice::resolve: ${which} frontend config -> ${cfgUrl}`);
+    } else {
+      console.log(`::notice::resolve: ${which} page had no rainbowConfigUrl; using fallback`);
     }
-    return best ? String(best) : "";
   } catch (e) {
-    console.log(`::notice::resolve archive lookup error: ${e.message}`);
-    return "";
+    console.log(`::notice::resolve: ${which} page fetch failed (${e.message}); using fallback config`);
   }
+  return parseRainbow(await fetchText(cfgUrl));
 }
 
 // Asset names already attached to the release for `tag` (empty set if none).
@@ -144,6 +92,7 @@ async function releaseAssets(tag) {
         Accept: "application/vnd.github+json",
         ...(token ? { Authorization: `Bearer ${token}` } : {}),
       },
+      signal: AbortSignal.timeout(30000),
     });
     if (!r.ok) return new Set();
     const rel = await r.json();
@@ -155,11 +104,12 @@ async function releaseAssets(tag) {
 
 // --- resolve ---------------------------------------------------------------
 
-const winCfg = parseRainbow(await fetchRetry(WIN_CONFIG));
-const linCfg = parseRainbow(await fetchRetry(LINUX_CONFIG));
+const winCfg = await frontendConfig("windows");
+const linCfg = await frontendConfig("linux");
 
 const out = {
   winver3: winCfg.version || "",
+  linuxver3: linCfg.version || "",
   update_date: winCfg.updateDate || linCfg.updateDate || "",
   win_x64_url: winCfg.ntDownloadX64Url || "",
   win_arm64_url: winCfg.ntDownloadARMUrl || "",
@@ -167,40 +117,26 @@ const out = {
   linux_arm64_url: linCfg.armDownloadUrl?.deb || "",
 };
 for (const [k, v] of Object.entries(out))
-  if (!v && k.endsWith("_url")) console.error(`::warning::resolve: missing ${k} in official config`);
-console.log(`::notice::resolve: winver3=${out.winver3} linuxver3?=${linCfg.version} linux_x64_url=${out.linux_x64_url || "(none)"}`);
+  if (!v && k.endsWith("_url")) console.error(`::warning::resolve: missing ${k} from frontend`);
 
-const probe = out.linux_x64_url ? await cheapBuild(out.linux_x64_url) : null;
-out.build = probe?.build || "";
-out.linuxver3 = probe?.linuxver3 || linCfg.version || "";
-if (!out.build) {
-  console.log("::notice::resolve: .deb probe gave no build; falling back to the version-history archive");
-  out.build = await buildFromArchive(out.winver3);
-}
-if (!out.build) {
-  fail(
-    `could not determine the build number. The cheap .deb probe failed (see notices above) AND ` +
-    `the version-history archive has no entry for ${out.winver3}. ` +
-    `linux_x64_url=${out.linux_x64_url || "(none)"}. Re-run later, or pin a known build.`
-  );
-}
+if (!out.win_x64_url && !out.linux_x64_url)
+  fail("frontend returned no download URLs (config shape changed or unreachable).");
 
-// The four target SDK folders / release assets, and the per-build release tag.
-const folders = [
-  `qqnt-sdk-${out.winver3}-${out.build}-windows-x64`,
-  `qqnt-sdk-${out.winver3}-${out.build}-windows-arm64`,
-  `qqnt-sdk-${out.linuxver3}-${out.build}-linux-x64`,
-  `qqnt-sdk-${out.linuxver3}-${out.build}-linux-arm64`,
-];
-const assets = folders.map((f) => `${f}.zip`);
-out.folders = folders.join(",");
-out.assets = assets.join(",");
-out.tag = `qq-${out.build}`;
+// Date code (YYMMDD), and the per-build content hash from the .../release/<hash>/
+// path segment. Tencent occasionally ships same-day rebuilds (same date, new
+// hash), so the hash — not the date — is what makes a release key unique; we
+// keep the date too for readability. The exact x.x.xx-xxxxx build goes into the
+// asset names (detected from the binaries by the build jobs).
+const anyUrl = out.win_x64_url || out.win_arm64_url || out.linux_x64_url || out.linux_arm64_url;
+out.datecode = (anyUrl.match(/_(\d{6})_/) || [])[1] || "";
+const hash = (anyUrl.match(/\/release\/([0-9a-f]{6,})\//) || [])[1] || "";
 
-// Skip when the release already has a .zip for every arch slot, regardless of
-// the exact version/build in each filename. This is robust to any cross-platform
-// build skew (the per-platform version the build jobs detect from the binaries
-// may differ from what we predicted here) - the tag qq-<build> still groups them.
+const keyparts = [out.winver3 || out.linuxver3, out.datecode, hash].filter(Boolean);
+if (!keyparts.length) fail("could not derive a release key (no version/date/hash in frontend URLs).");
+out.tag = `qq-${keyparts.join("-")}`;
+
+// Skip when the release already has a .zip for each arch slot, regardless of the
+// exact version/build in each filename (robust to cross-platform skew).
 const present = await releaseAssets(out.tag);
 const presentZips = [...present].filter((a) => a.endsWith(".zip"));
 const SLOTS = ["windows-x64", "windows-arm64", "linux-x64", "linux-arm64"];
@@ -216,5 +152,5 @@ if (gh) {
   appendFileSync(gh, lines.join("\n") + "\n");
 }
 
-console.log("=== resolve (latest -> release) ===");
+console.log("=== resolve (latest from frontend) ===");
 for (const [k, v] of Object.entries(out)) console.log(`${k}: ${v}`);

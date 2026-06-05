@@ -17,7 +17,7 @@ publishes a **QQNT SDK** for it as a GitHub Release — four `.zip` packages
 
 ## Package contents & naming
 
-Release **tag `qq-<build>`**, four assets:
+Release **tag `qq-<winver3>-<date>-<hash>`** (e.g. `qq-9.9.31-260528-092069d7`), four assets:
 
 ```
 qqnt-sdk-9.9.31-49738-windows-x64.zip
@@ -35,9 +35,11 @@ qqnt-sdk-<x.x.xx-xxxxx>-<system>-<arch>/
   manifest.txt         version, arch, sources, and electron/node/v8 versions
 ```
 
-`<x.x.xx-xxxxx>` is the platform's own version (Windows `9.9.x`, Linux `3.2.x`)
-plus the **shared build number** — the same release is `9.9.31-49738` on Windows
-and `3.2.29-49738` on Linux, so one tag (`qq-49738`) groups all four.
+The asset's `<x.x.xx-xxxxx>` is the platform's own version + the shared build
+number (`9.9.31-49738` on Windows, `3.2.29-49738` on Linux for the same release),
+detected from the binaries. The release **tag** is keyed by the Windows 3-part
+version + the download date code (both read straight from the frontend), so it's
+robust without partial-downloading anything.
 
 ## Using the headers
 
@@ -66,7 +68,7 @@ cmake_minimum_required(VERSION 3.19)
 project(myapp CXX)
 
 set(QQNT_SDK_REPO    "CloverNT/qqnt-sdk")   # the repo hosting the releases
-set(QQNT_SDK_VERSION "latest")       # or "49738" / "qq-49738" / "9.9.31-49738"
+set(QQNT_SDK_VERSION "latest")       # or a release tag, e.g. "qq-9.9.31-260528-092069d7"
 include(/path/to/cmake/qqnt_sdk.cmake)
 
 add_executable(myapp main.cpp)
@@ -95,12 +97,11 @@ files (the packaged `lib*.a` are MinGW/clang import libs); with clang/MinGW the
 
 ## How it works
 
-- **Schedule:** every 12 h (cron) it reads Tencent's official "rainbow" config
-  for the current release and the build number (cheaply — see below). **Manual:**
-  Actions → *Build QQ NT libs (latest)* → *Run workflow* (tick **force** to
-  rebuild a build that already exists).
-- If the release `qq-<build>` already has a `.zip` for each of the four arch
-  slots, the run is a **no-op**.
+- **Schedule:** every 12 h (cron) it parses the official QQ download pages for
+  the **latest** download URLs. **Manual:** Actions → *Build QQ NT libs (latest)*
+  → *Run workflow* (tick **force** to rebuild a release that already exists).
+- If the release `qq-<winver3>-<date>-<hash>` already has a `.zip` for each of the four
+  arch slots, the run is a **no-op**.
 - Otherwise: `prepare-release` creates the release once, then four matrix jobs
   build in parallel, each `gh release upload --clobber` its package.
 - **Header/version detection:** each build job scans its binary (`QQNT.dll` on
@@ -109,15 +110,18 @@ files (the packaged `lib*.a` are MinGW/clang import libs); with clang/MinGW the
   and remaps `include/node/*` → `include/QQNT/*`. The Node and V8 versions
   (mapped from the Electron version) are recorded in `manifest.txt`.
 
-### Why this resolution dance
+### Resolution: always the latest, parsed from the frontend
 
-Tencent's config only advertises the **latest** build and exposes just a 3-part
-version (no build number), served from `gtimg.cn` (works from non-CN CI runners;
-the `dldir1` CDN geo-blocks them). To name the release and skip early, the
-resolver reads the real build number cheaply — a single HTTP range request grabs
-the `.deb`'s ~40 KB control file (`Version: 3.2.29-49738`) instead of the ~200 MB
-package. The version each artifact is filed under is detected from the binaries
-(Windows `versions/<ver>` folder, Linux `resources/app/package.json`).
+QQ's CDN prunes old builds, so the pipeline never pins or guesses a build — it
+takes whatever the official site currently serves. `resolve.mjs` fetches the
+download page (`im.qq.com/pcqq/index.shtml`, `…/linuxqq/index.shtml`), reads its
+`rainbowConfigUrl`, fetches that config, and pulls the four download URLs (all on
+`gtimg.cn`, which works worldwide from CI). It keys the release on the Windows
+3-part version + date code + the per-build content hash from the `…/release/<hash>/`
+URL segment (so same-day rebuilds get a distinct release) — no partial-download.
+The exact `x.x.xx-xxxxx` build is detected from the binaries themselves (Windows
+`versions/<ver>` folder, Linux `resources/app/package.json`) and goes into the
+asset names + `manifest.txt`.
 
 ## Target mapping
 
@@ -161,9 +165,10 @@ are hundreds of MB — they belong in releases, not git history).
   small — expected.
 - **arm64 Windows import libs** are produced cross-host with `llvm-dlltool`.
 - **`skip`** treats a release as done once it has a `.zip` for each arch slot
-  under tag `qq-<build>`; uploads use `--clobber`, so re-runs never duplicate or
-  corrupt assets. Use **force** to rebuild.
-- **Latest only:** the pipeline tracks the current release.
+  under tag `qq-<winver3>-<date>-<hash>`; uploads use `--clobber`, so re-runs never
+  duplicate or corrupt assets. Use **force** to rebuild.
+- **Latest only:** the pipeline tracks the current release (QQ's CDN prunes old
+  builds, so only the latest is reliably downloadable).
 
 ## Local testing
 
