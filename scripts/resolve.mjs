@@ -18,10 +18,11 @@ function fail(msg) {
 if (!VERSION) fail('VERSION is required, e.g. "9.9.31-49738".');
 if (!WIN_URL && !LINUX_URL) fail("provide win_url and/or linux_url (an official QQ download link).");
 
-// e.g. QQ_9.9.31_260528_x64_01.exe - swap the arch token for the sibling arch.
-const WIN_RE = /_(x64|x86|arm64)_01\.(exe)\b/i;
-const LIN_RE = /_(amd64|arm64|x86_64|aarch64|loongarch64|mips64el)_01\.(deb|rpm|AppImage)\b/i;
-const swap = (url, re, token) => url.replace(re, (_m, _a, ext) => `_${token}_01.${ext}`);
+// e.g. QQ9.9.32.50969_x64.exe or QQ_9.9.31_260528_x64_01.exe (older CDN paths
+// keep a "_01" part suffix) - swap the arch token for the sibling arch.
+const WIN_RE = /_(x64|x86|arm64)((?:_\d+)?)\.(exe)\b/i;
+const LIN_RE = /_(amd64|arm64|x86_64|aarch64|loongarch64|mips64el)((?:_\d+)?)\.(deb|rpm|AppImage)\b/i;
+const swap = (url, re, token) => url.replace(re, (_m, _arch, suffix, ext) => `_${token}${suffix}.${ext}`);
 
 const isQQ = (u) => /^https:\/\/([a-z0-9.-]+\.)?(qq\.com|gtimg\.cn)\//i.test(u);
 for (const [k, u] of [["win_url", WIN_URL], ["linux_url", LINUX_URL]])
