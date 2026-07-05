@@ -2,18 +2,24 @@ name: Build QQ NT libs
 
 # Manual: QQ geo-gates version discovery and its download URLs carry an
 # unguessable per-build hash, so CI can't auto-find the latest - paste an
-# official QQ download link (https://im.qq.com) and both arches are derived
-# from it. `detect-version` reads the real version out of the installer, so
+# official QQ download link (https://im.qq.com) for each platform/arch you
+# want built. `detect-version` reads the real version out of one of them, so
 # nobody types a version number; it becomes the release tag `qq-<version>`.
 
 on:
   workflow_dispatch:
     inputs:
-      win_url:
-        description: 'Official QQ Windows installer link (any arch; x64+arm64 derived). Blank = skip Windows.'
+      win_x64_url:
+        description: 'Official QQ Windows x64 installer link. Blank = skip.'
         default: ''
-      linux_url:
-        description: 'Official QQ Linux .deb link (any arch; amd64+arm64 derived). Blank = skip Linux.'
+      win_arm64_url:
+        description: 'Official QQ Windows arm64 installer link. Blank = skip.'
+        default: ''
+      linux_x64_url:
+        description: 'Official QQ Linux x64 (amd64) .deb link. Blank = skip.'
+        default: ''
+      linux_arm64_url:
+        description: 'Official QQ Linux arm64 .deb link. Blank = skip.'
         default: ''
       force:
         description: 'Rebuild & re-upload even if the release already has the assets'
@@ -40,19 +46,21 @@ jobs:
       - name: Download a sample package
         run: |
           mkdir -p sample
-          if [ -n "${{ inputs.win_url }}" ]; then
-            echo "==> ${{ inputs.win_url }}"
-            curl -fL --retry 3 --connect-timeout 30 -o sample/pkg.exe "${{ inputs.win_url }}"
-            echo "PLATFORM=windows" >> "$GITHUB_ENV"
-            echo "PKG=sample/pkg.exe" >> "$GITHUB_ENV"
-          elif [ -n "${{ inputs.linux_url }}" ]; then
-            echo "==> ${{ inputs.linux_url }}"
-            curl -fL --retry 3 --connect-timeout 30 -o sample/pkg.deb "${{ inputs.linux_url }}"
-            echo "PLATFORM=linux" >> "$GITHUB_ENV"
-            echo "PKG=sample/pkg.deb" >> "$GITHUB_ENV"
+          if [ -n "${{ inputs.win_x64_url }}" ]; then
+            url="${{ inputs.win_x64_url }}"; ext=exe; platform=windows
+          elif [ -n "${{ inputs.win_arm64_url }}" ]; then
+            url="${{ inputs.win_arm64_url }}"; ext=exe; platform=windows
+          elif [ -n "${{ inputs.linux_x64_url }}" ]; then
+            url="${{ inputs.linux_x64_url }}"; ext=deb; platform=linux
+          elif [ -n "${{ inputs.linux_arm64_url }}" ]; then
+            url="${{ inputs.linux_arm64_url }}"; ext=deb; platform=linux
           else
-            echo "::error::provide win_url and/or linux_url" >&2; exit 1
+            echo "::error::provide at least one of win_x64_url, win_arm64_url, linux_x64_url, linux_arm64_url" >&2; exit 1
           fi
+          echo "==> $url"
+          curl -fL --retry 3 --connect-timeout 30 -o "sample/pkg.$ext" "$url"
+          echo "PLATFORM=$platform" >> "$GITHUB_ENV"
+          echo "PKG=sample/pkg.$ext" >> "$GITHUB_ENV"
       - id: dv
         run: bash scripts/detect_version.sh "$PKG" "$PLATFORM"
 
@@ -74,8 +82,10 @@ jobs:
         run: node scripts/resolve.mjs
         env:
           VERSION: ${{ needs.detect-version.outputs.version }}
-          WIN_URL: ${{ inputs.win_url }}
-          LINUX_URL: ${{ inputs.linux_url }}
+          WIN_X64_URL: ${{ inputs.win_x64_url }}
+          WIN_ARM64_URL: ${{ inputs.win_arm64_url }}
+          LINUX_X64_URL: ${{ inputs.linux_x64_url }}
+          LINUX_ARM64_URL: ${{ inputs.linux_arm64_url }}
           FORCE: ${{ inputs.force }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Summary

@@ -1,14 +1,16 @@
 #!/usr/bin/env node
-// Given official QQ download link(s), derives per-arch URLs (HEAD-checked
-// against QQ's CDN) and whether the release can be skipped.
-// Env: VERSION (required, auto-detected by the workflow), WIN_URL and/or
-// LINUX_URL (>=1), FORCE.
+// Takes an explicit QQ download link per platform/arch (no derivation),
+// HEAD-checks each, and reports whether the release can be skipped.
+// Env: VERSION (required, auto-detected by the workflow), WIN_X64_URL,
+// WIN_ARM64_URL, LINUX_X64_URL, LINUX_ARM64_URL (>=1 required), FORCE.
 import { appendFileSync } from "node:fs";
 
 const env = (k, d = "") => (process.env[k] ?? d).trim();
 const VERSION = env("VERSION");
-const WIN_URL = env("WIN_URL");
-const LINUX_URL = env("LINUX_URL");
+const WIN_X64_URL = env("WIN_X64_URL");
+const WIN_ARM64_URL = env("WIN_ARM64_URL");
+const LINUX_X64_URL = env("LINUX_X64_URL");
+const LINUX_ARM64_URL = env("LINUX_ARM64_URL");
 const FORCE = env("FORCE").toLowerCase() === "true";
 
 function fail(msg) {
@@ -16,28 +18,18 @@ function fail(msg) {
   process.exit(1);
 }
 if (!VERSION) fail('VERSION is required, e.g. "9.9.31-49738".');
-if (!WIN_URL && !LINUX_URL) fail("provide win_url and/or linux_url (an official QQ download link).");
-
-// e.g. QQ9.9.32.50969_x64.exe or QQ_9.9.31_260528_x64_01.exe (older CDN paths
-// keep a "_01" part suffix) - swap the arch token for the sibling arch.
-const WIN_RE = /_(x64|x86|arm64)((?:_\d+)?)\.(exe)\b/i;
-const LIN_RE = /_(amd64|arm64|x86_64|aarch64|loongarch64|mips64el)((?:_\d+)?)\.(deb|rpm|AppImage)\b/i;
-const swap = (url, re, token) => url.replace(re, (_m, _arch, suffix, ext) => `_${token}${suffix}.${ext}`);
+const entries = [
+  ["win", "x64", WIN_X64_URL],
+  ["win", "arm64", WIN_ARM64_URL],
+  ["linux", "x64", LINUX_X64_URL],
+  ["linux", "arm64", LINUX_ARM64_URL],
+];
+if (!entries.some(([, , u]) => u))
+  fail("provide at least one of win_x64_url, win_arm64_url, linux_x64_url, linux_arm64_url.");
 
 const isQQ = (u) => /^https:\/\/([a-z0-9.-]+\.)?(qq\.com|gtimg\.cn)\//i.test(u);
-for (const [k, u] of [["win_url", WIN_URL], ["linux_url", LINUX_URL]])
-  if (u && !isQQ(u)) console.error(`::warning::resolve: ${k} is not a qq.com/gtimg.cn link: ${u}`);
-
-const winCand = [];
-if (WIN_URL) {
-  if (WIN_RE.test(WIN_URL)) { winCand.push(["x64", swap(WIN_URL, WIN_RE, "x64")], ["arm64", swap(WIN_URL, WIN_RE, "arm64")]); }
-  else winCand.push(["x64", WIN_URL]);
-}
-const linCand = [];
-if (LINUX_URL) {
-  if (LIN_RE.test(LINUX_URL)) { linCand.push(["x64", swap(LINUX_URL, LIN_RE, "amd64")], ["arm64", swap(LINUX_URL, LIN_RE, "arm64")]); }
-  else linCand.push(["x64", LINUX_URL]);
-}
+for (const [platform, arch, u] of entries)
+  if (u && !isQQ(u)) console.error(`::warning::resolve: ${platform}_${arch}_url is not a qq.com/gtimg.cn link: ${u}`);
 
 // 403/404/410 => pruned/typo (drop); else keep.
 async function live(url) {
@@ -52,15 +44,17 @@ async function live(url) {
     return true;
   }
 }
-async function validate(cands, label) {
-  const keep = [];
-  for (const [arch, url] of cands) {
-    const ok = await live(url);
-    console.log(`::notice::resolve: ${ok ? "live" : "DEAD"} ${label}-${arch} -> ${url}`);
-    if (ok) keep.push({ arch, url });
-  }
-  return keep;
+
+const winM = [];
+const linM = [];
+for (const [platform, arch, url] of entries) {
+  if (!url) continue;
+  const ok = await live(url);
+  console.log(`::notice::resolve: ${ok ? "live" : "DEAD"} ${platform}-${arch} -> ${url}`);
+  if (ok) (platform === "win" ? winM : linM).push({ arch, url });
+  else console.error(`::warning::resolve: ${platform}_${arch}_url not live — skipping ${platform}-${arch}.`);
 }
+if (!winM.length && !linM.length) fail("none of the provided URLs are live on QQ's CDN — check the links.");
 
 async function releaseAssets(tag) {
   const repo = process.env.GITHUB_REPOSITORY;
@@ -78,12 +72,6 @@ async function releaseAssets(tag) {
     return new Set(((await r.json()).assets || []).map((a) => a.name));
   } catch { return new Set(); }
 }
-
-const winM = await validate(winCand, "win");
-const linM = await validate(linCand, "linux");
-if (!winM.length && !linM.length) fail("none of the provided URLs are live on QQ's CDN — check the links.");
-if (WIN_URL && !winM.length) console.error("::warning::resolve: win_url not live — skipping Windows.");
-if (LINUX_URL && !linM.length) console.error("::warning::resolve: linux_url not live — skipping Linux.");
 
 const out = {
   version: VERSION,

@@ -1,9 +1,9 @@
 # qq_lib_autogen
 
 A GitHub Actions pipeline you trigger manually — paste an official QQ download
-link — that publishes a **QQNT SDK** as a GitHub Release: `.zip` packages for
-**Windows x64/arm64** and **Linux x64/arm64**, each with linkable libs **and**
-matching Node/Electron headers.
+link per platform/arch — that publishes a **QQNT SDK** as a GitHub Release:
+`.zip` packages for **Windows x64/arm64** and **Linux x64/arm64**, each with
+linkable libs **and** matching Node/Electron headers.
 
 - **Windows libs**: reads each PE's exports into a `.def` and runs MSVC
   `lib.exe` to produce a genuine import library: `QQ.exe`→`QQ.lib`,
@@ -25,15 +25,16 @@ from any region.
 
 ## Triggering a build
 
-Actions → *Build QQ NT libs* → *Run workflow*:
+Actions → *Build QQ NT libs* → *Run workflow*, pasting an official link
+(<https://im.qq.com>) for each platform/arch you want built — blank = skip:
 
-- `win_url` — an official QQ Windows installer link (any arch). Blank = skip Windows.
-- `linux_url` — an official QQ Linux `.deb` link (any arch). Blank = skip Linux.
+- `win_x64_url` / `win_arm64_url` — QQ Windows installer link.
+- `linux_x64_url` / `linux_arm64_url` — QQ Linux `.deb` link (x64 = amd64).
 - `force` — rebuild even if the release already has the assets.
 
-One link per platform is enough — `resolve.mjs` derives the sibling arch by
-swapping the arch token and `HEAD`s each URL to drop pruned/typo'd ones. A run
-is a no-op if the release already has a `.zip` for every requested arch slot.
+Each URL is used as-is (no arch derivation) and `HEAD`-checked to drop
+pruned/typo'd links. A run is a no-op if the release already has a `.zip` for
+every requested arch slot.
 
 ## Package contents
 
@@ -92,7 +93,7 @@ the network), `QQNT_SDK_UPDATE=ON` (re-resolve `latest`), `QQNT_SDK_GITHUB_TOKEN
 ```text
 .github/workflows/build_qq_libs.yml   detect-version → resolve → prepare-release → build-windows / build-linux (matrix)
 scripts/detect_version.sh             reads the real version out of a downloaded installer/.deb
-scripts/resolve.mjs                   QQ link(s) + detected version → per-arch URLs (HEAD-checked) + release-skip
+scripts/resolve.mjs                   per-arch QQ links + detected version → HEAD-checked matrix + release-skip
 scripts/gen_import_libs.sh            Windows: 7z extract + PE→.def + MSVC lib.exe + headers
 scripts/pe_to_def.mjs                 read a PE export table → a .def for lib.exe
 scripts/extract_linux.sh              Linux: dpkg-deb extract + copy ELF + headers
