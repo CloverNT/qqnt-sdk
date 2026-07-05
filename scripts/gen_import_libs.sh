@@ -1,21 +1,7 @@
 #!/usr/bin/env bash
-# ---------------------------------------------------------------------------
-# gen_import_libs.sh  (bash; CI runs it with `shell: bash` = Git Bash on Windows)
-#
-# Extract a QQ NT Windows installer, detect its real x.x.xx-xxxxx version, build a
-# genuine MSVC import library (+ its .def) for each requested PE target, and
-# bundle the matching Node/Electron headers - producing an SDK folder:
-#     qqnt-sdk-<version>-windows-<arch>/
-#       lib/<name>.def , lib/<name>.lib          (PE exports -> MSVC lib.exe)
-#       include/QQNT/...                          (via fetch_headers.sh)
-#       manifest.txt
-#   e.g. QQNT.dll -> QQNT.lib, QQ.exe -> QQ.lib, wrapper.node -> wrapper.lib
-#
-# Usage:  gen_import_libs.sh <installer.exe> <outroot> <arch:x64|arm64> <t1,t2,...>
-#
-# Requires MSVC lib.exe on PATH (add the 'ilammy/msvc-dev-cmd' step) and node;
-# find/sort/grep/tar from Git Bash; 7-Zip from the Windows install. `file` optional.
-# ---------------------------------------------------------------------------
+# Extracts a QQ NT Windows installer, detects its version, builds an MSVC
+# import lib for each PE target, and bundles the matching Node/Electron headers.
+# Usage: gen_import_libs.sh <installer.exe> <outroot> <arch:x64|arm64> <t1,t2,...>
 set -euo pipefail
 
 INSTALLER="${1:?installer path required}"
@@ -47,7 +33,6 @@ while IFS= read -r -d '' inner; do
   "$SEVENZIP" x -y -bd "-o${inner}.d" "$inner" >/dev/null 2>&1 || true
 done < <(find "$EXTRACT" -type f \( -iname '*.7z' -o -iname '*.zip' \) -print0 2>/dev/null)
 
-# --- detect the real x.x.xx-xxxxx version ----------------------------------
 detect_version() {
   local v
   v="$(find "$EXTRACT" -type d -regextype posix-extended \
@@ -72,7 +57,6 @@ LIBDIR="$OUTDIR/lib"
 mkdir -p "$LIBDIR"
 echo "==> Detected version $VER  ->  $FOLDER"
 
-# --- MSVC import-lib toolchain (lib.exe + node to read PE exports) ----------
 case "$ARCH" in
   x64)   MACHINE=X64 ;;
   arm64) MACHINE=ARM64 ;;
@@ -105,7 +89,7 @@ for raw in "${LIST[@]}"; do
   node "$SCRIPT_DIR/pe_to_def.mjs" "$file_path" "$target" "$def"
   # MSYS2_ARG_CONV_EXCL: stop Git Bash from mangling lib.exe's /flag arguments.
   MSYS2_ARG_CONV_EXCL='*' "$LIB_EXE" /nologo "/def:$def" "/out:$lib" "/machine:$MACHINE"
-  rm -f "$LIBDIR/${base}.exp"   # lib.exe /def byproduct, not needed by consumers
+  rm -f "$LIBDIR/${base}.exp"
   sz=$(stat -c '%s' "$lib" 2>/dev/null || echo '?')
   echo "    -> lib/$(basename "$lib") (${sz} bytes), lib/$(basename "$def")"
   echo "target=$target source=$file_path def=lib/$(basename "$def") importlib=lib/$(basename "$lib") (${sz}B)" >> "$MANIFEST"
@@ -122,16 +106,11 @@ if [ "${#missing[@]}" -gt 0 ]; then
   echo "::warning::Requested targets not found: ${missing[*]}"
 fi
 
-# --- bundle the matching Node/Electron headers -----------------------------
-# Electron version lives in QQNT.dll (the framework module). If a future build
-# renames it, fall back to the largest .dll (the framework). NOT QQ.exe - that
-# is only a small launcher stub and carries no "Electron/<ver>" string.
+# Electron version lives in QQNT.dll; fall back to the largest .dll.
 hdrbin="$(find "$EXTRACT" -iname QQNT.dll | head -n1 || true)"
 [ -z "$hdrbin" ] && hdrbin="$(find "$EXTRACT" -type f -iname '*.dll' -printf '%s\t%p\n' 2>/dev/null | sort -rn | head -n1 | cut -f2- || true)"
 [ -z "$hdrbin" ] && { echo "::error::no binary found to detect Electron version" >&2; exit 1; }
 bash "$SCRIPT_DIR/fetch_headers.sh" "$hdrbin" "$OUTDIR"
 
 echo "==> SDK ready: $OUTDIR"
-# `|| true`: head closes the pipe early -> ls gets SIGPIPE; don't let that fail
-# the step (pipefail+set -e) after the SDK is already built.
 ls -lR "$OUTDIR" | head -n 40 || true

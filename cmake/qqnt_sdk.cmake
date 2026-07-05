@@ -1,42 +1,22 @@
-# ===========================================================================
-# qqnt_sdk.cmake — download & configure the QQNT SDK from this repo's Releases.
+# qqnt_sdk.cmake - downloads & configures the QQNT SDK from this repo's Releases.
 #
-# Resolves the matching qqnt-sdk-<ver>-<system>-<arch>.zip asset, downloads and
-# extracts it into a persistent cache (so re-running CMake does NOT re-download),
-# and defines an imported target plus result variables.
-#
-# Quick start (in your CMakeLists.txt):
-#
-#   set(QQNT_SDK_REPO   "owner/repo")     # the GitHub repo that hosts the releases
-#   set(QQNT_SDK_VERSION "latest")        # or a release tag, e.g. "qq-9.9.31-260528-092069d7"
+#   set(QQNT_SDK_REPO    "owner/repo")
+#   set(QQNT_SDK_VERSION "latest")   # or a release tag, e.g. "qq-9.9.31-260528-092069d7"
 #   include(${CMAKE_CURRENT_LIST_DIR}/cmake/qqnt_sdk.cmake)
-#
 #   add_executable(app main.cpp)
 #   target_link_libraries(app PRIVATE QQNT::QQNT)   # adds include/ (+ libs)
 #   # then:  #include <QQNT/node.h>   /   <QQNT/node_api.h>   /   <QQNT/v8.h>
 #
-# Options / cache variables (set before include()):
-#   QQNT_SDK_REPO         owner/repo (required; auto-detected from this checkout's
-#                         git 'origin' remote if unset)
-#   QQNT_SDK_VERSION      "latest" (default) or a release tag (qq-<winver3>-<date>-<hash>)
-#   QQNT_SDK_ARCH         x64 | arm64        (default: from CMAKE_SYSTEM_PROCESSOR)
-#   QQNT_SDK_CACHE_DIR    download/extract cache (default: per-user cache dir)
-#   QQNT_SDK_GITHUB_TOKEN token for the releases API / private repos (optional)
-#   QQNT_SDK_LINK_LIBS    ON (default) to also link the libs; OFF for headers-only
-#                         (e.g. an N-API addon whose host resolves symbols)
-#   QQNT_SDK_OFFLINE      ON to never hit the network (fail if not already cached)
-#   QQNT_SDK_UPDATE       ON to re-resolve "latest" even if something is cached
-#
-# Result variables (set in the including scope):
-#   QQNT_SDK_DIR, QQNT_SDK_INCLUDE_DIR, QQNT_SDK_LIB_DIR
-#   QQNT_SDK_VERSION_RESOLVED, QQNT_NODE_VERSION, QQNT_ELECTRON_VERSION, QQNT_V8_VERSION
-# ===========================================================================
+# Vars (set before include()): QQNT_SDK_REPO, QQNT_SDK_VERSION, QQNT_SDK_ARCH,
+# QQNT_SDK_CACHE_DIR, QQNT_SDK_GITHUB_TOKEN, QQNT_SDK_LINK_LIBS (headers-only
+# if OFF), QQNT_SDK_OFFLINE, QQNT_SDK_UPDATE.
+# Outputs: QQNT_SDK_DIR, QQNT_SDK_INCLUDE_DIR, QQNT_SDK_LIB_DIR,
+# QQNT_SDK_VERSION_RESOLVED, QQNT_NODE_VERSION, QQNT_ELECTRON_VERSION, QQNT_V8_VERSION.
 
 if(CMAKE_VERSION VERSION_LESS 3.19)
   message(FATAL_ERROR "qqnt_sdk: CMake >= 3.19 required (string(JSON), file(ARCHIVE_EXTRACT)).")
 endif()
 
-# ---- inputs / defaults ----------------------------------------------------
 if(NOT DEFINED QQNT_SDK_VERSION)
   set(QQNT_SDK_VERSION "latest")
 endif()
@@ -72,7 +52,7 @@ if(NOT QQNT_SDK_ARCH)
 endif()
 set(_qq_slot "${_qq_sys}-${QQNT_SDK_ARCH}")
 
-# ---- repo (explicit, else from this checkout's git origin) ----------------
+# ---- repo: explicit, else from this checkout's git origin ------------------
 if(NOT QQNT_SDK_REPO)
   find_program(_qq_git git)
   if(_qq_git)
@@ -84,7 +64,7 @@ if(NOT QQNT_SDK_REPO)
   endif()
 endif()
 if(NOT QQNT_SDK_REPO)
-  set(QQNT_SDK_REPO "CloverNT/qqnt-sdk")   # default: this project's repo
+  set(QQNT_SDK_REPO "CloverNT/qqnt-sdk")
 endif()
 
 # ---- cache dir ------------------------------------------------------------
@@ -107,10 +87,10 @@ set(_qq_hdr "Accept: application/vnd.github+json")
 if(QQNT_SDK_GITHUB_TOKEN)
   set(_qq_auth "Authorization: Bearer ${QQNT_SDK_GITHUB_TOKEN}")
 else()
-  set(_qq_auth "X-QQNT-NoAuth: 1")   # harmless placeholder header
+  set(_qq_auth "X-QQNT-NoAuth: 1")
 endif()
 
-# ---- helper: find an already-extracted SDK in the cache for this slot ------
+# ---- find an already-extracted SDK in the cache for this slot --------------
 function(_qq_find_cached out_dir)
   set(${out_dir} "" PARENT_SCOPE)
   file(GLOB _cands "${QQNT_SDK_CACHE_DIR}/qqnt-sdk-*-${_qq_slot}")
@@ -124,7 +104,7 @@ function(_qq_find_cached out_dir)
   endforeach()
 endfunction()
 
-# ---- fast path: reuse a previously resolved SDK with NO network ------------
+# ---- fast path: reuse a previously resolved SDK with no network -----------
 set(_qq_req "${QQNT_SDK_VERSION}:${_qq_slot}")
 set(_qq_dir "")
 if(NOT QQNT_SDK_UPDATE
@@ -144,8 +124,7 @@ if(NOT _qq_dir)
     endif()
     message(STATUS "qqnt_sdk: OFFLINE, using cached ${_qq_dir}")
   else()
-    # Build the releases API url: the newest release, or a specific tag. Accept
-    # either a full tag ("qq-9.9.31-260528-092069d7") or a bare key ("9.9.31-260528").
+    # Newest release, or a specific tag; accepts a full tag or a bare key.
     if(QQNT_SDK_VERSION STREQUAL "latest")
       set(_qq_api "https://api.github.com/repos/${QQNT_SDK_REPO}/releases/latest")
     else()
@@ -247,21 +226,20 @@ set(QQNT_SDK_DIR         "${_qq_dir}")
 set(QQNT_SDK_INCLUDE_DIR "${_qq_dir}/include")
 set(QQNT_SDK_LIB_DIR     "${_qq_dir}/lib")
 
-# ---- collect libraries ----------------------------------------------------
+# ---- collect libraries ------------------------------------------------------
 set(_qq_libs "")
 if(QQNT_SDK_LINK_LIBS)
   if(_qq_sys STREQUAL "windows")
-    # The package ships genuine MSVC import libs (*.lib) — link them directly
-    # (works with MSVC and clang-cl; the matching .def files sit alongside).
+    # Genuine MSVC import libs (*.lib); works with MSVC and clang-cl.
     file(GLOB _qq_libs "${_qq_dir}/lib/*.lib")
   else()
-    # Linux: link the native ELF shared object (wrapper.node) directly. `qq` is
-    # the Electron executable (provided for reference) and is not linked.
+    # Link the native ELF shared object directly; `qq` (the Electron
+    # executable) is provided for reference and not linked.
     file(GLOB _qq_libs "${_qq_dir}/lib/*.node" "${_qq_dir}/lib/*.so")
   endif()
 endif()
 
-# ---- imported target ------------------------------------------------------
+# ---- imported target --------------------------------------------------------
 if(NOT TARGET QQNT::QQNT)
   add_library(QQNT::QQNT INTERFACE IMPORTED)
 endif()

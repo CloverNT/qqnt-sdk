@@ -1,16 +1,8 @@
 #!/usr/bin/env node
-// ---------------------------------------------------------------------------
-// pe_to_def.mjs <pe-file> <dll-name> <out.def>
-//
-// Read a PE (DLL/EXE/.node) export table and write a module-definition file:
-//   LIBRARY "<dll-name>"
-//   EXPORTS
-//       <name>
-//       ...
-// Fed to MSVC `lib.exe /def:<out.def> /out:<name>.lib /machine:<X64|ARM64>` to
-// produce a genuine MSVC import library. Lists named exports (what consumers
-// link against by name) — works for x64 and arm64 PEs alike.
-// ---------------------------------------------------------------------------
+// Reads a PE (DLL/EXE/.node) export table and writes a .def file, fed to MSVC
+// `lib.exe /def:<out.def> /out:<name>.lib /machine:<X64|ARM64>` to produce an
+// import library.
+// Usage: pe_to_def.mjs <pe-file> <dll-name> <out.def>
 import { readFileSync, writeFileSync } from "node:fs";
 
 const [file, dllName, outDef] = process.argv.slice(2);

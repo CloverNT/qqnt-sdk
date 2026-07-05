@@ -1,7 +1,4 @@
-// Minimal check that the QQNT headers are wired up via the <QQNT/...> prefix.
-// node_version.h is dependency-free (just macros), so this compiles cleanly and
-// proves the include path resolves. For real use, pull in <QQNT/node_api.h>
-// (N-API) or <QQNT/v8.h> (V8 C++ API).
+// Minimal check that the QQNT headers resolve via the <QQNT/...> prefix.
 #include <QQNT/node_version.h>
 #include <cstdio>
 

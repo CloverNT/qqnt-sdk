@@ -1,12 +1,10 @@
 cmake_minimum_required(VERSION 3.19)
 project(qqnt_sdk_example CXX)
 
-# Which repo/release to pull the SDK from, and which version.
 set(QQNT_SDK_REPO    "CloverNT/qqnt-sdk" CACHE STRING "GitHub owner/repo hosting the QQNT SDK releases")
 set(QQNT_SDK_VERSION "latest"            CACHE STRING "latest | a release tag, e.g. qq-9.9.31-260528-092069d7")
 
-# For a pure N-API addon (the host process resolves the symbols at load time),
-# set this OFF before including the module to get headers-only:
+# For a pure N-API addon, set this OFF before include() for headers-only:
 #   set(QQNT_SDK_LINK_LIBS OFF)
 
 include(${CMAKE_CURRENT_LIST_DIR}/../../cmake/qqnt_sdk.cmake)

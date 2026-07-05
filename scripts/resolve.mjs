@@ -1,25 +1,8 @@
 #!/usr/bin/env node
-// ---------------------------------------------------------------------------
-// resolve.mjs - MANUAL mode.
-//
-// QQ's download config is geo-gated (it only serves the latest build to China
-// IPs; overseas/CI runners get a stale snapshot whose files are already pruned),
-// and the download URLs carry an unguessable per-build hash. So a US CI runner
-// cannot auto-discover the latest. Instead the maintainer drives each build:
-//
-//   version : the QQ version this build is for (e.g. 9.9.31-49738). Used for the
-//             release tag `qq-<version>` and what CMake consumers request.
-//   win_url : an official QQ Windows installer link (any arch) — both x64 and
-//             arm64 are derived from it by swapping the arch token.
-//   linux_url: an official QQ Linux .deb link (any arch) — amd64 + arm64 derived.
-//
-// The links are copied straight from QQ's download page (https://im.qq.com), so
-// this is still "direct from QQ" — no third-party version list. Each derived URL
-// is HEAD-checked against QQ's CDN so a typo or a pruned link is caught early.
-//
-// Env: VERSION (required), WIN_URL and/or LINUX_URL (>=1), FORCE.
-// ---------------------------------------------------------------------------
-
+// Given official QQ download link(s), derives per-arch URLs (HEAD-checked
+// against QQ's CDN) and whether the release can be skipped.
+// Env: VERSION (required, auto-detected by the workflow), WIN_URL and/or
+// LINUX_URL (>=1), FORCE.
 import { appendFileSync } from "node:fs";
 
 const env = (k, d = "") => (process.env[k] ?? d).trim();
@@ -35,8 +18,7 @@ function fail(msg) {
 if (!VERSION) fail('VERSION is required, e.g. "9.9.31-49738".');
 if (!WIN_URL && !LINUX_URL) fail("provide win_url and/or linux_url (an official QQ download link).");
 
-// Arch token in the QQ filename, e.g. QQ_9.9.31_260528_x64_01.exe /
-// QQ_3.2.29_260528_amd64_01.deb. Swapping it derives the sibling-arch URL.
+// e.g. QQ_9.9.31_260528_x64_01.exe - swap the arch token for the sibling arch.
 const WIN_RE = /_(x64|x86|arm64)_01\.(exe)\b/i;
 const LIN_RE = /_(amd64|arm64|x86_64|aarch64|loongarch64|mips64el)_01\.(deb|rpm|AppImage)\b/i;
 const swap = (url, re, token) => url.replace(re, (_m, _a, ext) => `_${token}_01.${ext}`);
@@ -45,11 +27,10 @@ const isQQ = (u) => /^https:\/\/([a-z0-9.-]+\.)?(qq\.com|gtimg\.cn)\//i.test(u);
 for (const [k, u] of [["win_url", WIN_URL], ["linux_url", LINUX_URL]])
   if (u && !isQQ(u)) console.error(`::warning::resolve: ${k} is not a qq.com/gtimg.cn link: ${u}`);
 
-// Candidate (folder-arch-token -> download URL) pairs derived from each input.
 const winCand = [];
 if (WIN_URL) {
   if (WIN_RE.test(WIN_URL)) { winCand.push(["x64", swap(WIN_URL, WIN_RE, "x64")], ["arm64", swap(WIN_URL, WIN_RE, "arm64")]); }
-  else winCand.push(["x64", WIN_URL]); // unknown arch token: take as-is (x64)
+  else winCand.push(["x64", WIN_URL]);
 }
 const linCand = [];
 if (LINUX_URL) {
@@ -57,7 +38,7 @@ if (LINUX_URL) {
   else linCand.push(["x64", LINUX_URL]);
 }
 
-// HEAD each URL against QQ's CDN. 403/404/410 => pruned/typo (drop); else keep.
+// 403/404/410 => pruned/typo (drop); else keep.
 async function live(url) {
   try {
     const r = await fetch(url, {
@@ -67,7 +48,7 @@ async function live(url) {
     });
     return ![403, 404, 410].includes(r.status);
   } catch {
-    return true; // transient: don't drop; the build job's download will settle it
+    return true;
   }
 }
 async function validate(cands, label) {
@@ -97,8 +78,6 @@ async function releaseAssets(tag) {
   } catch { return new Set(); }
 }
 
-// --- resolve ---------------------------------------------------------------
-
 const winM = await validate(winCand, "win");
 const linM = await validate(linCand, "linux");
 if (!winM.length && !linM.length) fail("none of the provided URLs are live on QQ's CDN — check the links.");
@@ -113,7 +92,6 @@ const out = {
   force: String(FORCE),
 };
 
-// Skip when the release already has a .zip for every requested arch slot.
 const wantSlots = [...winM.map((e) => `windows-${e.arch}`), ...linM.map((e) => `linux-${e.arch}`)];
 const present = await releaseAssets(out.tag);
 const presentZips = [...present].filter((a) => a.endsWith(".zip"));

@@ -1,19 +1,7 @@
 #!/usr/bin/env bash
-# ---------------------------------------------------------------------------
-# extract_linux.sh
-#
-# Unpack a QQ NT Linux .deb (or .AppImage), detect its x.x.xx-xxxxx version,
-# copy out the two native objects, and bundle the matching Node/Electron headers
-# - producing an SDK folder:
-#     qqnt-sdk-<version>-linux-<arch>/
-#       lib/qq , lib/wrapper.node                     (native ELF, link directly)
-#       include/QQNT/...                              (via fetch_headers.sh)
-#       manifest.txt
-#
-#   collected: qq (Linux equivalent of QQ.exe) and wrapper.node
-#
-# Usage:  extract_linux.sh <package> <outroot> <arch:x64|arm64>
-# ---------------------------------------------------------------------------
+# Unpacks a QQ NT Linux .deb (or .AppImage), detects its version, copies out
+# the native objects (qq, wrapper.node), and bundles matching Electron headers.
+# Usage: extract_linux.sh <package> <outroot> <arch:x64|arm64>
 set -euo pipefail
 
 PKG="${1:?package path required}"
@@ -38,13 +26,13 @@ find_7z() {
 echo "==> Unpacking $PKG"
 case "$PKG" in
   *.deb)
-    if command -v dpkg-deb >/dev/null 2>&1; then          # ubuntu / CI path
+    if command -v dpkg-deb >/dev/null 2>&1; then
       dpkg-deb -x "$PKG_ABS" "$ROOT"
-    elif command -v ar >/dev/null 2>&1; then               # any host with binutils
+    elif command -v ar >/dev/null 2>&1; then
       ( cd "$WORK" && ar x "$PKG_ABS" )
       data="$(find "$WORK" -maxdepth 1 -name 'data.tar.*' | head -n1 || true)"
       tar -xf "$data" -C "$ROOT"
-    else                                                    # Windows/macOS fallback
+    else
       sz="$(find_7z)"; [ -z "$sz" ] && { echo "::error::need dpkg-deb, ar, or 7-Zip" >&2; exit 1; }
       "$sz" x -y "-o${WORK}/ar" "$PKG_ABS" >/dev/null
       data="$(find "$WORK/ar" -maxdepth 1 -name 'data.tar.*' | head -n1 || true)"
@@ -60,7 +48,6 @@ case "$PKG" in
     echo "::error::unsupported package type: $PKG" >&2; exit 1 ;;
 esac
 
-# --- detect the real x.x.xx-xxxxx version ----------------------------------
 PJ="$(find "$WORK" -type f -path '*/resources/app/package.json' 2>/dev/null | head -n1 || true)"
 VER=""
 [ -n "$PJ" ] && VER="$(grep -oE '"version"[[:space:]]*:[[:space:]]*"[^"]+"' "$PJ" \
@@ -113,13 +100,10 @@ fi
   echo "::warning::missing: ${missing[*]}"
 }
 
-# --- bundle the matching Node/Electron headers (Electron string lives in qq) -
 [ -z "$QQBIN" ] && QQBIN="$(find_one qq)"
 [ -z "$QQBIN" ] && { echo "::error::could not find the qq binary to detect Electron version" >&2; exit 1; }
 bash "$SCRIPT_DIR/fetch_headers.sh" "$QQBIN" "$OUTDIR"
 
 echo "==> SDK ready: $OUTDIR"
-# `|| true`: head closes the pipe early -> ls gets SIGPIPE; don't let that fail
-# the step (pipefail+set -e) after the SDK is already built.
 ls -lR "$OUTDIR" | head -n 40 || true
 exit 0

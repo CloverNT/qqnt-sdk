@@ -1,18 +1,14 @@
 name: Build QQ NT libs
 
-# MANUAL build. QQ geo-gates its download config (only China IPs get the latest;
-# overseas CI gets stale, pruned links) and the URLs carry an unguessable
-# per-build hash — so a US runner can't auto-discover the latest. You drive each
-# build: give the version and paste an official QQ download link (copied from
-# https://im.qq.com). Both arches are derived from one link per platform. The
-# four packages are published to a GitHub Release tagged `qq-<version>`.
+# Manual: QQ geo-gates version discovery and its download URLs carry an
+# unguessable per-build hash, so CI can't auto-find the latest - paste an
+# official QQ download link (https://im.qq.com) and both arches are derived
+# from it. `detect-version` reads the real version out of the installer, so
+# nobody types a version number; it becomes the release tag `qq-<version>`.
 
 on:
   workflow_dispatch:
     inputs:
-      version:
-        description: 'QQ version this build is for, e.g. 9.9.31-49738 (tag + what CMake requests)'
-        required: true
       win_url:
         description: 'Official QQ Windows installer link (any arch; x64+arm64 derived). Blank = skip Windows.'
         default: ''
@@ -32,8 +28,36 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # -------------------------------------------------------------------------
+  # Downloads one of the provided links and reads the real version out of it.
+  detect-version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.dv.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install extractor (7z reads the Windows installer)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq p7zip-full >/dev/null
+      - name: Download a sample package
+        run: |
+          mkdir -p sample
+          if [ -n "${{ inputs.win_url }}" ]; then
+            echo "==> ${{ inputs.win_url }}"
+            curl -fL --retry 3 --connect-timeout 30 -o sample/pkg.exe "${{ inputs.win_url }}"
+            echo "PLATFORM=windows" >> "$GITHUB_ENV"
+            echo "PKG=sample/pkg.exe" >> "$GITHUB_ENV"
+          elif [ -n "${{ inputs.linux_url }}" ]; then
+            echo "==> ${{ inputs.linux_url }}"
+            curl -fL --retry 3 --connect-timeout 30 -o sample/pkg.deb "${{ inputs.linux_url }}"
+            echo "PLATFORM=linux" >> "$GITHUB_ENV"
+            echo "PKG=sample/pkg.deb" >> "$GITHUB_ENV"
+          else
+            echo "::error::provide win_url and/or linux_url" >&2; exit 1
+          fi
+      - id: dv
+        run: bash scripts/detect_version.sh "$PKG" "$PLATFORM"
+
   resolve:
+    needs: detect-version
     runs-on: ubuntu-latest
     outputs:
       skip: ${{ steps.r.outputs.skip }}
@@ -49,7 +73,7 @@ jobs:
       - id: r
         run: node scripts/resolve.mjs
         env:
-          VERSION: ${{ inputs.version }}
+          VERSION: ${{ needs.detect-version.outputs.version }}
           WIN_URL: ${{ inputs.win_url }}
           LINUX_URL: ${{ inputs.linux_url }}
           FORCE: ${{ inputs.force }}
@@ -65,8 +89,7 @@ jobs:
             echo "- skip: ${{ steps.r.outputs.skip }}"
           } >> "$GITHUB_STEP_SUMMARY"
 
-  # Ensure the release exists once, so the parallel build jobs can upload to it
-  # without racing on release creation.
+  # Ensure the release exists once, so the matrix build jobs can upload to it.
   prepare-release:
     needs: resolve
     if: needs.resolve.outputs.skip != 'true'
@@ -99,7 +122,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Puts MSVC lib.exe (the librarian) on PATH for the bash step below.
       - uses: ilammy/msvc-dev-cmd@v1
 
       - name: Download installer
